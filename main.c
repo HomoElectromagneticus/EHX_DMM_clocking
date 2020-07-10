@@ -8,8 +8,8 @@
  *               ---|2 / RA5   RA0 / 13|---
  *               ---|3 / RA4   RA1 / 12|---
  *               ---|4 / RA3   RA2 / 11|--- potentiometer "input"
- *       clk out ---|5 / RC5   RC0 / 10|--- 
- *               ---|6 / RC4   RC1 /  9|--- 
+ *     clk out+  ---|5 / RC5   RC0 / 10|--- 
+ *     clk out-  ---|6 / RC4   RC1 /  9|--- 
  *               ---|7 / RC3   RC2 /  8|--- "on" light
  *                   ------------------
  * 
@@ -19,28 +19,38 @@
  */
 
 // CONFIG1
-#pragma config FOSC = INTOSC    // Oscillator Selection (INTOSC oscillator: I/O function on CLKIN pin)
-#pragma config WDTE = ON        // Watchdog Timer Enable (WDT disabled)
-#pragma config PWRTE = ON       // Power-up Timer Enable (PWRT enabled)
-#pragma config MCLRE = ON       // MCLR Pin Function Select (MCLR/VPP pin function is MCLR)
-#pragma config CP = OFF         // Flash Program Memory Code Protection (Program memory code protection is disabled)
-#pragma config CPD = OFF        // Data Memory Code Protection (Data memory code protection is disabled)
-#pragma config BOREN = ON       // Brown-out Reset Enable (Brown-out Reset enabled)
-#pragma config CLKOUTEN = OFF   // Clock Out Enable (CLKOUT function is disabled. I/O or oscillator function on the CLKOUT pin)
-#pragma config IESO = OFF       // Internal/External Switchover (Internal/External Switchover mode is disabled)
-#pragma config FCMEN = OFF      // Fail-Safe Clock Monitor Enable (Fail-Safe Clock Monitor is disabled)
+#pragma config FEXTOSC = OFF    // FEXTOSC External Oscillator mode Selection bits (Oscillator not enabled)
+#pragma config RSTOSC = HFINT32 // Power-up default value for COSC bits (HFINTOSC with 2x PLL (32MHz))
+#pragma config CLKOUTEN = OFF   // Clock Out Enable bit (CLKOUT function is disabled; I/O or oscillator function on OSC2)
+#pragma config CSWEN = OFF      // Clock Switch Enable bit (The NOSC and NDIV bits cannot be changed by user software)
+#pragma config FCMEN = ON       // Fail-Safe Clock Monitor Enable (Fail-Safe Clock Monitor is enabled)
 
 // CONFIG2
-#pragma config WRT = OFF        // Flash Memory Self-Write Protection (Write protection off)
-#pragma config PLLEN = OFF      // PLL Enable (4x PLL disabled)
-#pragma config STVREN = ON      // Stack Overflow/Underflow Reset Enable (Stack Overflow or Underflow will cause a Reset)
-#pragma config BORV = LO        // Brown-out Reset Voltage Selection (Brown-out Reset Voltage (Vbor), low trip point selected.)
-#pragma config LVP = OFF        // Low-Voltage Programming Enable (Low-voltage programming disabled)
+#pragma config MCLRE = ON       // Master Clear Enable bit (MCLR/VPP pin function is MCLR; Weak pull-up enabled)
+#pragma config PWRTE = OFF      // Power-up Timer Enable bit (PWRT disabled)
+#pragma config WDTE = ON        // Watchdog Timer Enable bits (WDT enabled, SWDTEN is ignored)
+#pragma config LPBOREN = OFF    // Low-power BOR enable bit (ULPBOR disabled)
+#pragma config BOREN = ON       // Brown-out Reset Enable bits (Brown-out Reset enabled, SBOREN bit ignored)
+#pragma config BORV = HIGH      // Brown-out Reset Voltage selection bit (Brown-out voltage (Vbor) set to 2.7V)
+#pragma config PPS1WAY = OFF    // PPSLOCK bit One-Way Set Enable bit (The PPSLOCK bit can be set and cleared repeatedly (subject to the unlock sequence))
+#pragma config STVREN = ON      // Stack Overflow/Underflow Reset Enable bit (Stack Overflow or Underflow will cause a Reset)
+#pragma config DEBUG = ON       // Debugger enable bit (Background debugger enabled)
+
+// CONFIG3
+#pragma config WRT = OFF        // User NVM self-write protection bits (Write protection off)
+#pragma config LVP = OFF        // Low Voltage Programming Enable bit (High Voltage on MCLR/VPP must be used for programming.)
+
+// CONFIG4
+#pragma config CP = OFF         // User NVM Program Memory Code Protection bit (User NVM code protection disabled)
+#pragma config CPD = OFF        // Data NVM Memory Code Protection bit (Data NVM code protection disabled)
+
+// #pragma config statements should precede project file includes.
+// Use project enums instead of #define for ON and OFF.
 
 #include <xc.h>
 
 unsigned int adc_result = 0;    //this is where the ADC value will be stored
-int tmp = 0;
+char toggle_state = 0;           //state of the output clock
 
 void adc_init(void){
     // sets up the ADC
@@ -49,50 +59,85 @@ void adc_init(void){
     ADCON1bits.ADPREF = 0b00;   //ADC positive reference is set to VDD
     ADCON1bits.ADNREF = 0;      //ADC negative reference is set to VSS
     ADCON0bits.CHS = 0b00010;   //selecting the AN2 analog channel
-    ADCON1bits.ADCS = 0b100;    //ADC clock set to FOSC/4
+    ADCON1bits.ADCS = 0b010;    //ADC clock set to FOSC/32 (1us convertion time with Fosc = 32MHz)
     ADCON1bits.ADFM = 1;        //ADC result is right justified
 
     ADCON0bits.ADON = 1;        //turn ADC on
 }
 
-void timer1_init(void){
-    // timer 1 is used to drive the compare module
-    T1CONbits.TMR1ON = 0;       //turn off timer1 for config
-    PIR1bits.TMR1IF = 0;        //clear the timer1 overflow interrupt flag
+void  NCO1_init(void){
+    // sets up the NCO module
+    NCO1CONbits.N1EN = 0;       //turn off the NCO for config
     
-    T1CONbits.T1CKPS = 0b00;    //set timer1's prescaler (set to 1:1)
-    T1CONbits.TMR1CS = 0b00;    //set timer1's clock source (set to Fosc/4)
-    T1CONbits.T1OSCEN = 0;      //dedicated timer1 oscillator disabled
+    NCO1CONbits.N1PFM = 0;      //set the NCO output to a fixed 50% duty cycle
+    NCO1CLKbits.N1CKS = 0x00;   //set the NCO clock to the HFINTOSC (16MHz)
     
-    // the above sets timer1 overflow interrupts frequency to
-    // (Fosc / 4) * prescaler * (1/ (2^16))) = 61.04Hz if Fosc = 16MHz
-    T1CONbits.TMR1ON = 1;       //turn on timer1
+    // set the NCO increment value to 255 just to start. this should initialize
+    // the NCO overflow frequency to 3.891kHz. therefore the real output
+    // frequency should be 1.945kHz
+    NCO1INCL = 0xFF;
+    NCO1INCH = 0x00;
+    NCO1INCU = 0x0;
+    
+    NCO1CONbits.N1EN = 1;       //turn on the NCO
 }
 
-void compare1_init(void){
-    // the compare1 module is used to define the output clock rate by toggling
-    // an output pin based on timer1's state
-    CCP1CONbits.CCP1M = 0b0010; //CCP1 set to compare mode (output pin toggles)
-    CCPR1 = 0xFFFF;             //compare reg set to max as default (~30Hz output)
+void CWG_init(void){
+    // set up the complementary waveform generator
+    CWG1CON0bits.CWG1EN = 0;        //disable the CWG
+    
+    CWG1CON0bits.CWG1MODE = 0b100;  //CWG set to half-bridge mode
+    CWG1CON1bits.POLA = 0;          //output A is normal
+    CWG1CON1bits.POLB = 1;          //output B is inverted
+    CWG1CLKCONbits.CS = 1;          //the HFINTOSC drives the dead band timer
+    CWG1CLKCONbits.CWG1CS = 0b1001; //the NCO drive the CWG input
+    CWG1DBRbits.DBR = 0b000001;     //rising dead band is 1-2 HFINTOSC periods
+    CWG1DBFbits.DBF = 0b000001;     //falling dead band is 1-2 HFINTOSC periods
+    
+    CWG1CON0bits.CWG1EN = 1;        //enable the CWG
 }
 
-void tmr1_interrupt_handler(void){
-    //read the potentiometer
-    adc_result = ADC_Convert();
+void PPS_init(void){
+    // set up the pin assignments for the various peripherals
+    PPSLOCKbits.PPSLOCKED = 0;      //unlock the peripheral control
+    
+    RC5PPSbits.RC5PPS = 0b01000;    //RC5 is attached to the CWG1A output
+    RC4PPSbits.RC4PPS = 0b01001;    //RC4 is attached to the CWG1B output
 }
 
-int ADC_Convert(void){
+void timer2_init(void){
+    // timer 2 is used to schedule the ADC readings. the clock source is
+    // Fosc / 4
+    T2CONbits.TMR2ON = 0;       //turn off timer 2 for conifg
+    PIR1bits.TMR2IF = 0;        //clear ther timer 2 overflow interrupt flag
+    
+    T2CONbits.T2CKPS = 0b11;    //prescaler set to 1:64
+    T2CONbits.T2OUTPS = 0b1111; //postscaler set to 1:16
+    PR2 = 0xFF;                 //let the match register equal the largest value possible
+    
+    // the above sets the timer 2 overflow interrupt frequency to
+    // (Fosc / 4) * prescaler * (1 / (2^8)) * postscaler = ~30Hz
+    T2CONbits.TMR2ON = 1;       //turn on timer2
+}
+
+void tmr2_interrupt_handler(void){
+    // if the ADC has completed a conversion, write the value into the "results"
+    // register
+    if (ADCON0bits.GO_nDONE == 0){
+        adc_result = ADRES;
+    }
     ADCON0bits.GO_nDONE = 1;               //start ADC
-    while (ADCON0bits.GO_nDONE == 1);      //wait for ADC to finish
-    return (ADRESL + (ADRESH * 256));      //return full 10-bit number
+    
+    // use the ADC value to drive the NCO frequency by adjusting the increment
+    // register (using only the most-significant 8 bits for now)
+    NCO1INCH = adc_result >> 2;
 }
 
 void main(void) {
     // configure the internal clock to run at 16MHz. this means that the
-    // instruction clock will run at 4MHz (Fosc/4)
-    OSCCONbits.SPLLEN = 0b0;    //4xPLL disabled (also disable by config word)
-    OSCCONbits.IRCF = 0b1111;   //HFINTOSC set to 16MHz
-    OSCCONbits.SCS = 0b00;      //clock source set by FOSC config word
+    // instruction clock will run at 2MHz (Fosc/4)
+    OSCCON1bits.NOSC = 0b000;   //set the "new osc" source to HFINTC w/ 2x PLL
+    OSCFRQbits.HFFRQ = 0b0100;  //set the HFINTOSC to 8MHz
 
     // configure the watchdog timer
     WDTCONbits.WDTPS = 0b01011; //set to 2s timer
@@ -108,22 +153,22 @@ void main(void) {
     ANSELA = 0b00000100;        //set RA2 (pin 11) as an analog input (AN2 channel))
     ANSELC = 0b00000000;        //nothing on port C is an analog input
     
-    // turn on interrupts
-    PIE1bits.TMR1IE = 0;      //disable timer1 overflow interrupt
-    PIE1bits.CCP1IE = 1;      //enable compare1 match interrupt
+    // configure the internal peripherals
+    adc_init();
+    NCO1_init();              //configure the NCO
+    CWG_init();               //configure the complementary waveform generator
+    PPS_init();               //assign peripherals to pins
+    
+     // turn on interrupts
+    PIE1bits.TMR2IE = 0;      //enable timer 2 to PR2 match interrupt
     INTCONbits.PEIE = 1;      //enable peripheral interrupts
     INTCONbits.GIE = 1;       //general interrupts enabled
     
-    // configure the timers, the adc, and the compare peripheral
-    adc_init();
-    timer1_init();
-    compare1_init();
-    
-    PORTCbits.RC2 = 1;          //just to tell the user that the program started
+    LATC = 0x00;              //init the port c latches
+    LATCbits.LATC2 = 1;       //just to tell the user that the program started        
         
     while(1){
-        adc_result = ADC_Convert();
-        CCPR1 = (adc_result >> 1) + 1;
+        CCPR1 = adc_result + 16;
         CLRWDT();               //clear the Watchdog Timer to keep the PIC from
                                 //resetting
     }
@@ -131,15 +176,10 @@ void main(void) {
 }
 
 void interrupt ISR(void){
-    // check for compare1 match interrupt
-    if(PIR1bits.CCP1IF == 1){
-        TMR1 = 0;                           //reset timer1
-        PIR1bits.CCP1IF = 0;                //reset the interrupt flag
-    }
-    
-    // check for timer1 overflow interrupt (this interrupt shouldn't happen)
-    if(PIR1bits.TMR1IF == 1){
-        PIR1bits.TMR1IF = 0;                 //reset the interrupt flag
+    // check for timer 2 to PR2 match interrupt
+    if(PIR1bits.TMR2IF == 1){
+        tmr2_interrupt_handler();
+        PIR1bits.TMR2IF = 0;                 //reset the interrupt flag
     }
     
    return;
