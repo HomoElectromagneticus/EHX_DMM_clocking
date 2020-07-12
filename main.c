@@ -7,8 +7,8 @@
  *           VDD ---|1               14|--- VSS
  *               ---|2 / RA5   RA0 / 13|---
  *               ---|3 / RA4   RA1 / 12|---
- *               ---|4 / RA3   RA2 / 11|--- potentiometer "input"
- *     clk out+  ---|5 / RC5   RC0 / 10|--- 
+ *               ---|4 / RA3   RA2 / 11|--- potentiometer input
+ *     clk out+  ---|5 / RC5   RC0 / 10|--- tap tempo button input
  *     clk out-  ---|6 / RC4   RC1 /  9|--- 
  *               ---|7 / RC3   RC2 /  8|--- "on" light
  *                   ------------------
@@ -50,6 +50,7 @@
 #include <xc.h>
 
 unsigned int adc_result = 0;    //this is where the ADC value will be stored
+unsigned char last_button_state;//the last state of the tap tempo button
 
 void adc_init(void){
     // sets up the ADC
@@ -127,11 +128,11 @@ void timer2_init(void){
     
     T2CONbits.T2CKPS = 0b11;    //prescaler set to 1:64
     T2CONbits.T2OUTPS = 0b1111; //postscaler set to 1:16
-    PR2 = 0xFF;                 //let the match register equal the largest value possible
+    PR2 = 194;                  //match register set to give a "round" interrupt freq
     
     // the above sets the timer 2 overflow interrupt frequency to
-    // (Fosc / 4) * prescaler * (1 / (2^8)) * postscaler = interrupt freq.
-    // (2MHz) * (1/64) * (1 / (2^8)) * 1/16 = ~7.6Hz
+    // (Fosc / 4) * prescaler * (1 / (PR2)) * postscaler = interrupt freq.
+    // (2MHz) * (1/64) * (1 / (194)) * 1/16 = ~10Hz
     T2CONbits.TMR2ON = 1;       //turn on timer2
 }
 
