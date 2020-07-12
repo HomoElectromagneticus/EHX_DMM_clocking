@@ -2,7 +2,7 @@
  * File:   main.c
  * Author: rschaub
  *
- *                   PIC16F1825
+ *                   PIC16F18326
  *                   __________________
  *           VDD ---|1               14|--- VSS
  *               ---|2 / RA5   RA0 / 13|---
@@ -34,7 +34,7 @@
 #pragma config BORV = HIGH      // Brown-out Reset Voltage selection bit (Brown-out voltage (Vbor) set to 2.7V)
 #pragma config PPS1WAY = OFF    // PPSLOCK bit One-Way Set Enable bit (The PPSLOCK bit can be set and cleared repeatedly (subject to the unlock sequence))
 #pragma config STVREN = ON      // Stack Overflow/Underflow Reset Enable bit (Stack Overflow or Underflow will cause a Reset)
-#pragma config DEBUG = ON       // Debugger enable bit (Background debugger enabled)
+#pragma config DEBUG = OFF      // Debugger enable bit (Background debugger enabled)
 
 // CONFIG3
 #pragma config WRT = OFF        // User NVM self-write protection bits (Write protection off)
@@ -50,7 +50,6 @@
 #include <xc.h>
 
 unsigned int adc_result = 0;    //this is where the ADC value will be stored
-char toggle_state = 0;           //state of the output clock
 
 void adc_init(void){
     // sets up the ADC
@@ -75,9 +74,9 @@ void  NCO1_init(void){
     // set the NCO increment value to 255 just to start. this should initialize
     // the NCO overflow frequency to 3.891kHz. therefore the real output
     // frequency should be 1.945kHz
-    NCO1INCL = 0xFF;
-    NCO1INCH = 0x00;
     NCO1INCU = 0x0;
+    NCO1INCH = 0x00;
+    NCO1INCL = 0xFF;
     
     NCO1CONbits.N1EN = 1;       //turn on the NCO
 }
@@ -88,13 +87,28 @@ void CWG_init(void){
     
     CWG1CON0bits.CWG1MODE = 0b100;  //CWG set to half-bridge mode
     CWG1CON1bits.POLA = 0;          //output A is normal
-    CWG1CON1bits.POLB = 1;          //output B is inverted
-    CWG1CLKCONbits.CS = 1;          //the HFINTOSC drives the dead band timer
-    CWG1CLKCONbits.CWG1CS = 0b1001; //the NCO drive the CWG input
-    CWG1DBRbits.DBR = 0b000001;     //rising dead band is 1-2 HFINTOSC periods
-    CWG1DBFbits.DBF = 0b000001;     //falling dead band is 1-2 HFINTOSC periods
+    CWG1CON1bits.POLB = 0;          //output B is inverted
+    CWG1DATbits.DAT = 0b1001;       //the NCO is the CWG data input
     
+    // shutdown settings
+    CWG1AS0bits.CWG1LSAC = 0b01;    //output pins will tri-state in shutdown
+    CWG1AS0bits.CWG1LSBD = 0b01;    //output pins will tri-state in shutdown
+    CWG1AS0bits.REN = 1;            //auto restart enabled
+    CWG1AS1bits.AS0E = 0;           //auto shutdown from PPS disabled
+    CWG1AS1bits.AS1E = 0;           //auto shutdown from comp 1 disabled
+    CWG1AS1bits.AS2E = 0;           //auto shutdown from comp 2 disabled
+    CWG1AS1bits.AS3E = 0;           //auto shutdown from CLC 2 disabled
+    CWG1AS1bits.AS4E = 0;           //auto shutdown from CLC 3 disabled
+    
+    CWG1DBRbits.DBR = 0b000010;     //rising dead band is 1-2 HFINTOSC periods
+    CWG1DBFbits.DBF = 0b000010;     //falling dead band is 1-2 HFINTOSC periods
+    CWG1CLKCONbits.CS = 1;          //the HFINTOSC drives the dead band time
     CWG1CON0bits.CWG1EN = 1;        //enable the CWG
+    
+    TRISCbits.TRISC4 = 0;           //set RC4 (pin 6) as an output
+    TRISCbits.TRISC5 = 0;           //set RC5 (pin 5) as an output
+    
+    CWG1AS0bits.SHUTDOWN = 0;       //disable shutdown
 }
 
 void PPS_init(void){
@@ -116,7 +130,8 @@ void timer2_init(void){
     PR2 = 0xFF;                 //let the match register equal the largest value possible
     
     // the above sets the timer 2 overflow interrupt frequency to
-    // (Fosc / 4) * prescaler * (1 / (2^8)) * postscaler = ~30Hz
+    // (Fosc / 4) * prescaler * (1 / (2^8)) * postscaler = interrupt freq.
+    // (2MHz) * (1/64) * (1 / (2^8)) * 1/16 = ~7.6Hz
     T2CONbits.TMR2ON = 1;       //turn on timer2
 }
 
@@ -129,8 +144,10 @@ void tmr2_interrupt_handler(void){
     ADCON0bits.GO_nDONE = 1;               //start ADC
     
     // use the ADC value to drive the NCO frequency by adjusting the increment
-    // register (using only the most-significant 8 bits for now)
-    NCO1INCH = adc_result >> 2;
+    // register (using only the most-significant 10 bits for now)
+    NCO1INCU = adc_result >> 8;
+    NCO1INCH = adc_result & 0xFF;
+    NCO1INCL = 0xFF;
 }
 
 void main(void) {
@@ -158,9 +175,10 @@ void main(void) {
     NCO1_init();              //configure the NCO
     CWG_init();               //configure the complementary waveform generator
     PPS_init();               //assign peripherals to pins
+    timer2_init();            //turn on timer2
     
      // turn on interrupts
-    PIE1bits.TMR2IE = 0;      //enable timer 2 to PR2 match interrupt
+    PIE1bits.TMR2IE = 1;      //enable timer 2 to PR2 match interrupt
     INTCONbits.PEIE = 1;      //enable peripheral interrupts
     INTCONbits.GIE = 1;       //general interrupts enabled
     
@@ -168,7 +186,6 @@ void main(void) {
     LATCbits.LATC2 = 1;       //just to tell the user that the program started        
         
     while(1){
-        CCPR1 = adc_result + 16;
         CLRWDT();               //clear the Watchdog Timer to keep the PIC from
                                 //resetting
     }
