@@ -49,8 +49,14 @@
 
 #include <xc.h>
 
-unsigned int adc_result = 0;    //this is where the ADC value will be stored
-unsigned char last_button_state;//the last state of the tap tempo button
+unsigned int adc_result = 0;            //this is where the ADC value will be stored
+
+//variables to handle tap tempo button debouncing
+unsigned int DB_INTEGRATOR_MAX = 6;
+unsigned int DB_INTEGRATOR_THRESHOLD = 3;
+unsigned int db_input = 0;
+unsigned int db_integrator = 0;
+unsigned int db_output = 0;
 
 void adc_init(void){
     // sets up the ADC
@@ -124,16 +130,32 @@ void timer2_init(void){
     // timer 2 is used to schedule the ADC readings. the clock source is
     // Fosc / 4
     T2CONbits.TMR2ON = 0;       //turn off timer 2 for conifg
-    PIR1bits.TMR2IF = 0;        //clear ther timer 2 overflow interrupt flag
+    PIR1bits.TMR2IF = 0;        //clear the timer 2 match interrupt flag
     
     T2CONbits.T2CKPS = 0b11;    //prescaler set to 1:64
     T2CONbits.T2OUTPS = 0b1111; //postscaler set to 1:16
     PR2 = 194;                  //match register set to give a "round" interrupt freq
     
-    // the above sets the timer 2 overflow interrupt frequency to
+    // the above sets the timer 2 match interrupt frequency to
     // (Fosc / 4) * prescaler * (1 / (PR2)) * postscaler = interrupt freq.
     // (2MHz) * (1/64) * (1 / (194)) * 1/16 = ~10Hz
     T2CONbits.TMR2ON = 1;       //turn on timer2
+}
+
+void timer4_init(void){
+    // timer 4 is used to run the tap tempo button debouncing. the clock source
+    // is Fosc / 4
+    T4CONbits.TMR4ON = 0;       //turn off timer 4 for config
+    PIR2bits.TMR4IF = 0;        //clear the timer 4 match interrupt flag
+    
+    T4CONbits.T4CKPS = 0b10;    //prescaler set to 1:16
+    T4CONbits.T4OUTPS = 0b0111; //postscaler set to 1:8
+    PR4 = 78;
+    
+    // the above sets the timer 4 match interrupt frequency to
+    // (Fosc / 4) * prescaler * (1 / (PR2)) * postscaler = interrupt freq.
+    // (2MHz) * (1/16) * (1 / (78)) * (1/8) = ~200Hz
+    T4CONbits.TMR4ON = 1;       //turn on timer 4
 }
 
 void tmr2_interrupt_handler(void){
@@ -151,6 +173,28 @@ void tmr2_interrupt_handler(void){
     NCO1INCL = 0xFF;
 }
 
+void tmr4_interrupt_handler(void){
+    // check the status of the tap tempo button, and set the tap tempo positive
+    // edge flag appropriately
+    
+    // run the debounce integrator to filter out mechanical switch bounce
+    if (PORTCbits.RC0 == 0){
+        if (db_integrator > 0){
+            db_integrator--;
+        }
+    } else if (db_integrator < DB_INTEGRATOR_MAX){
+        db_integrator++;
+    }
+    
+    // turn the LED on if the debounce integrator exceeds the threshold
+    if (db_integrator >= DB_INTEGRATOR_THRESHOLD){
+        LATCbits.LATC2 = 1;        
+    } else {
+        LATCbits.LATC2 = 0;
+    }
+        
+}
+
 void main(void) {
     // configure the internal clock to run at 16MHz. this means that the
     // instruction clock will run at 2MHz (Fosc/4)
@@ -161,8 +205,8 @@ void main(void) {
     WDTCONbits.WDTPS = 0b01011; //set to 2s timer
     
     // configure the inputs and outputs
-    TRISAbits.TRISA2 = 1;       //set RA2 (pin 11) as input (for analog input)
-    TRISCbits.TRISC0 = 0;       //set RC0 (pin 10) as output
+    TRISAbits.TRISA2 = 1;       //set RA2 (pin 11) as input (analog input for "speed" pot)
+    TRISCbits.TRISC0 = 1;       //set RC0 (pin 10) as input (for tap tempo button)
     TRISCbits.TRISC1 = 0;       //set RC1 (pin 9) as output
     TRISCbits.TRISC2 = 0;       //set RC2 (pin 8) as output
     TRISCbits.TRISC3 = 0;       //set RC3 (pin 7) as an output
@@ -172,14 +216,16 @@ void main(void) {
     ANSELC = 0b00000000;        //nothing on port C is an analog input
     
     // configure the internal peripherals
-    adc_init();
+    adc_init();               //configure the ADC
     NCO1_init();              //configure the NCO
     CWG_init();               //configure the complementary waveform generator
     PPS_init();               //assign peripherals to pins
     timer2_init();            //turn on timer2
+    timer4_init();            //turn on timer4
     
      // turn on interrupts
     PIE1bits.TMR2IE = 1;      //enable timer 2 to PR2 match interrupt
+    PIE2bits.TMR4IE =  1;     //enable timer 4 to PR2 match interrupt
     INTCONbits.PEIE = 1;      //enable peripheral interrupts
     INTCONbits.GIE = 1;       //general interrupts enabled
     
@@ -198,6 +244,12 @@ void interrupt ISR(void){
     if(PIR1bits.TMR2IF == 1){
         tmr2_interrupt_handler();
         PIR1bits.TMR2IF = 0;                 //reset the interrupt flag
+    }
+    
+    // check fir time 4 to PR4 match interrupt
+    if(PIR2bits.TMR4IF == 1){
+        tmr4_interrupt_handler();
+        PIR2bits.TMR4IF = 0;                 //reset the interrupt flag
     }
     
    return;
