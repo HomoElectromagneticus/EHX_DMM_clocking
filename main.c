@@ -55,6 +55,8 @@ unsigned int last_tap_time = 0;
 unsigned int current_tap_time = 0;
 unsigned long NCO_increment = 0;
 unsigned int delay_time = 0;
+unsigned int high_timer0_byte = 0;      //need this to ensure timer0 is read correctly
+unsigned int low_timer0_byte = 0;       //need this to ensure timer0 is read correctly
 
 //variables to handle tap tempo button debouncing
 const unsigned int DB_INTEGRATOR_MAX = 6;
@@ -210,7 +212,7 @@ void tmr4_interrupt_handler(void){
     // check the status of the tap tempo button, and set the tap tempo positive
     // edge flag appropriately
     
-    // run the debounce integrator to filter out mechanical switch bounce
+    // run the debounce integrator to filter out mechanical switch bounce.
     // the button is default high, so the check is for 1 to get us back to
     // a high state being active
     if (PORTCbits.RC0 == 1){
@@ -239,6 +241,18 @@ void tmr4_interrupt_handler(void){
 void compute_write_new_nco_freq(unsigned int time){
     NCO_increment = (536871 / time);
     
+    // establish a lower frequency limit. this limit is, for now, set to just
+    // below the lower clock frequency limit on the stock DMM
+    if (NCO_increment < 900){
+        NCO_increment = 900;
+    }
+    
+    // establish an upper frequency limit. this limit is, for now, set to just
+    // above the upper clock frequency limit on the stock DMM
+    if (NCO_increment > 18000){
+        NCO_increment = 18000;
+    }
+    
     // split this value up and put it in the NCO increment register
     NCO1INCU = NCO_increment >> 16;
     NCO1INCH = (NCO_increment >> 8) & 0xFF;
@@ -252,17 +266,25 @@ void calc_tap_tempo(void){
     // on timer 0 and tell the rest of the program we're doing a tap tempo
     if (tap_tempo_mode == 0){
         T0CON0bits.T0EN = 1;        //turn on timer 0
-        tap_tempo_mode = 1;        //set the tap tempo flag
+        tap_tempo_mode = 1;         //set the tap tempo flag
         return;                     //leave early on the first button push
     }
 
     // after the first button push, we have to store how long it has been
     // since the last button push
-    current_tap_time = (TMR0H << 8) + TMR0L;
+    low_timer0_byte = TMR0L;
+    high_timer0_byte = TMR0H;
+    current_tap_time = (high_timer0_byte << 8) + low_timer0_byte;
     
-    //write a new value to the NCO increment register
+    // determine the time in milliseconds between the current tap and the last
+    // tap
     delay_time = (current_tap_time + last_tap_time) / 2;
-    compute_write_new_nco_freq(delay_time);
+    
+    // ignore the delay time if it's too long (limit set to 1 second for now).
+    // otherwise write a new value to the NCO
+    if (delay_time < 1000){
+        compute_write_new_nco_freq(delay_time);
+    }
     
     // reset timer 0
     TMR0H = 0;
