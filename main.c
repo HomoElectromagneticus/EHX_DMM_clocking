@@ -28,13 +28,13 @@
 // CONFIG2
 #pragma config MCLRE = ON       // Master Clear Enable bit (MCLR/VPP pin function is MCLR; Weak pull-up enabled)
 #pragma config PWRTE = OFF      // Power-up Timer Enable bit (PWRT disabled)
-#pragma config WDTE = ON        // Watchdog Timer Enable bits (WDT enabled, SWDTEN is ignored)
+#pragma config WDTE = OFF       // Watchdog Timer Enable bits (WDT enabled, SWDTEN is ignored)
 #pragma config LPBOREN = OFF    // Low-power BOR enable bit (ULPBOR disabled)
 #pragma config BOREN = ON       // Brown-out Reset Enable bits (Brown-out Reset enabled, SBOREN bit ignored)
 #pragma config BORV = HIGH      // Brown-out Reset Voltage selection bit (Brown-out voltage (Vbor) set to 2.7V)
 #pragma config PPS1WAY = OFF    // PPSLOCK bit One-Way Set Enable bit (The PPSLOCK bit can be set and cleared repeatedly (subject to the unlock sequence))
 #pragma config STVREN = ON      // Stack Overflow/Underflow Reset Enable bit (Stack Overflow or Underflow will cause a Reset)
-#pragma config DEBUG = OFF      // Debugger enable bit (Background debugger enabled)
+#pragma config DEBUG = ON       // Debugger enable bit (Background debugger enabled)
 
 // CONFIG3
 #pragma config WRT = OFF        // User NVM self-write protection bits (Write protection off)
@@ -50,13 +50,18 @@
 #include <xc.h>
 
 unsigned int adc_result = 0;            //this is where the ADC value will be stored
+unsigned int tap_tempo_mode = 0;        //are we in tap tempo mode or not?
+unsigned int last_tap_time = 0;
+unsigned int current_tap_time = 0;
+unsigned long NCO_increment = 0;
+unsigned int delay_time = 0;
 
 //variables to handle tap tempo button debouncing
-unsigned int DB_INTEGRATOR_MAX = 6;
-unsigned int DB_INTEGRATOR_THRESHOLD = 3;
-unsigned int db_input = 0;
-unsigned int db_integrator = 0;
-unsigned int db_output = 0;
+const unsigned int DB_INTEGRATOR_MAX = 6;
+const unsigned int DB_INTEGRATOR_THRESHOLD = 3;
+unsigned int db_integrator = 0;         //integration register for the debounce routine
+unsigned int last_button_state = 0;     //the last state of the debounced button
+unsigned int tt_pos_edge_detected = 0;  //did we catch a positive edge?
 
 void adc_init(void){
     // sets up the ADC
@@ -72,7 +77,11 @@ void adc_init(void){
 }
 
 void  NCO1_init(void){
-    // sets up the NCO module
+    // sets up the NCO module. the output clock frequency of the module as it
+    // is setup below is:
+    // clock_freq = ((NCO_clock_freq * NCO_increment_value) / (2^20)) / 2
+    // clock frequency relates to delay time in the memory man:
+    // delay time = (total_BBD_stages / (2 * clock_freq)
     NCO1CONbits.N1EN = 0;       //turn off the NCO for config
     
     NCO1CONbits.N1PFM = 0;      //set the NCO output to a fixed 50% duty cycle
@@ -126,6 +135,25 @@ void PPS_init(void){
     RC4PPSbits.RC4PPS = 0b01001;    //RC4 is attached to the CWG1B output
 }
 
+void timer0_init(void){
+    // timer 0 is used for the tap tempo timing. the clock source is Fosc/4
+    
+    T0CON0bits.T0EN = 0;        //turn off timer 0 for config
+    PIR0bits.TMR0IF = 0;        //clear the timer 0 overflow interrupt flag
+    
+    T0CON0bits.T016BIT = 1;     //timer 0 runs in 16bit mode
+    T0CON0bits.T0OUTPS = 0b111; //timer 0 post scaler set to 1:16
+    T0CON1bits.T0CKPS = 0b111;  //timer 0 prescaler set to 1:128
+    T0CON1bits.T0CS = 0b010;    //timer 0 clock source set to Fosc/4
+    
+    // reset timer 0
+    TMR0H = 0;
+    TMR0L = 0;
+    
+    // the above configures timer 0 such that each count equals 1.024ms. the
+    // overflow interrupt will occur 67.11s after the timer starts
+}
+
 void timer2_init(void){
     // timer 2 is used to schedule the ADC readings. the clock source is
     // Fosc / 4
@@ -166,6 +194,11 @@ void tmr2_interrupt_handler(void){
     }
     ADCON0bits.GO_nDONE = 1;               //start ADC
     
+    // no need to write to the NCO if we're in tap tempo mode
+    if (tap_tempo_mode){
+        return;
+    }
+    
     // use the ADC value to drive the NCO frequency by adjusting the increment
     // register (using only the most-significant 10 bits for now)
     NCO1INCU = adc_result >> 8;
@@ -178,7 +211,9 @@ void tmr4_interrupt_handler(void){
     // edge flag appropriately
     
     // run the debounce integrator to filter out mechanical switch bounce
-    if (PORTCbits.RC0 == 0){
+    // the button is default high, so the check is for 1 to get us back to
+    // a high state being active
+    if (PORTCbits.RC0 == 1){
         if (db_integrator > 0){
             db_integrator--;
         }
@@ -186,13 +221,55 @@ void tmr4_interrupt_handler(void){
         db_integrator++;
     }
     
-    // turn the LED on if the debounce integrator exceeds the threshold
-    if (db_integrator >= DB_INTEGRATOR_THRESHOLD){
-        LATCbits.LATC2 = 1;        
+    //find out if we detected a positive edge
+    if ((last_button_state == 0) && (db_integrator >= DB_INTEGRATOR_THRESHOLD)){
+        tt_pos_edge_detected = 1;
     } else {
-        LATCbits.LATC2 = 0;
+        tt_pos_edge_detected = 0;
+    }   
+    
+    // record the new "last button state"
+    if (db_integrator >= DB_INTEGRATOR_THRESHOLD){
+        last_button_state = 1;       
+    } else {
+        last_button_state = 0;
+    }    
+}
+
+void compute_write_new_nco_freq(unsigned int time){
+    NCO_increment = (536871 / time);
+    
+    // split this value up and put it in the NCO increment register
+    NCO1INCU = NCO_increment >> 16;
+    NCO1INCH = (NCO_increment >> 8) & 0xFF;
+    NCO1INCL = NCO_increment & 0xFF;
+}
+
+void calc_tap_tempo(void){
+    // here is where we figure out how to set the NCO clock based on the tap
+    // tempo signal
+    // when the button is pushed for the first time in a while, we have to turn 
+    // on timer 0 and tell the rest of the program we're doing a tap tempo
+    if (tap_tempo_mode == 0){
+        T0CON0bits.T0EN = 1;        //turn on timer 0
+        tap_tempo_mode = 1;        //set the tap tempo flag
+        return;                     //leave early on the first button push
     }
-        
+
+    // after the first button push, we have to store how long it has been
+    // since the last button push
+    current_tap_time = (TMR0H << 8) + TMR0L;
+    
+    //write a new value to the NCO increment register
+    delay_time = (current_tap_time + last_tap_time) / 2;
+    compute_write_new_nco_freq(delay_time);
+    
+    // reset timer 0
+    TMR0H = 0;
+    TMR0L = 0;
+    
+    // overwrite the last tap time with the latest one
+    last_tap_time = current_tap_time;
 }
 
 void main(void) {
@@ -220,26 +297,39 @@ void main(void) {
     NCO1_init();              //configure the NCO
     CWG_init();               //configure the complementary waveform generator
     PPS_init();               //assign peripherals to pins
-    timer2_init();            //turn on timer2
-    timer4_init();            //turn on timer4
+    timer0_init();            //setup timer 0
+    timer2_init();            //setup and turn on timer 2
+    timer4_init();            //setup and turn on timer 4
     
      // turn on interrupts
-    PIE1bits.TMR2IE = 1;      //enable timer 2 to PR2 match interrupt
-    PIE2bits.TMR4IE =  1;     //enable timer 4 to PR2 match interrupt
+    PIE0bits.TMR0IE = 1;      //enable the timer 0 overflow interrupt
+    PIE1bits.TMR2IE = 1;      //enable the timer 2 to PR2 match interrupt
+    PIE2bits.TMR4IE =  1;     //enable the timer 4 to PR2 match interrupt
     INTCONbits.PEIE = 1;      //enable peripheral interrupts
     INTCONbits.GIE = 1;       //general interrupts enabled
     
     LATC = 0x00;              //init the port c latches
-    LATCbits.LATC2 = 1;       //just to tell the user that the program started        
+    LATCbits.LATC2 = 0;       //just to tell the user that the program started        
         
     while(1){
         CLRWDT();               //clear the Watchdog Timer to keep the PIC from
                                 //resetting
+
+        if (tt_pos_edge_detected){
+            calc_tap_tempo();
+            tt_pos_edge_detected = 0;
+        }
     }
     return;
 }
 
 void interrupt ISR(void){
+    // check for timer 0 overflow interrupt
+    if (PIR0bits.TMR0IF == 1){
+        T0CON0bits.T0EN = 0;                 //turn off timer 0
+        PIR0bits.TMR0IF = 0;                 //reset the interrupt flag
+    }
+    
     // check for timer 2 to PR2 match interrupt
     if(PIR1bits.TMR2IF == 1){
         tmr2_interrupt_handler();
