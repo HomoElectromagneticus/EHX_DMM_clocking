@@ -49,21 +49,19 @@
 
 #include <xc.h>
 
+// variables for the ADC
 unsigned int adc_result = 0;            //this is where the ADC value will be stored
-unsigned int tap_tempo_mode = 0;        //are we in tap tempo mode or not?
+volatile bit adc_timing_flag = 0;      //signal to tell the program to run the ADC routine
+
+// variables for the tap tempo delay time calculation
+volatile bit calc_tap_tempo_flag = 0;   //sign that we need to compute tempo
+volatile bit tap_tempo_mode = 0;        //are we in tap tempo mode or not?
 unsigned int last_tap_time = 0;
 unsigned int current_tap_time = 0;
-unsigned long NCO_increment = 0;
 unsigned int delay_time = 0;
-unsigned int high_timer0_byte = 0;      //need this to ensure timer0 is read correctly
-unsigned int low_timer0_byte = 0;       //need this to ensure timer0 is read correctly
 
-//variables to handle tap tempo button debouncing
-const unsigned int DB_INTEGRATOR_MAX = 6;
-const unsigned int DB_INTEGRATOR_THRESHOLD = 3;
-unsigned int db_integrator = 0;         //integration register for the debounce routine
-unsigned int last_button_state = 0;     //the last state of the debounced button
-unsigned int tt_pos_edge_detected = 0;  //did we catch a positive edge?
+unsigned short long NCO_increment = 0;
+
 
 void adc_init(void){
     // sets up the ADC
@@ -72,7 +70,7 @@ void adc_init(void){
     ADCON1bits.ADPREF = 0b00;   //ADC positive reference is set to VDD
     ADCON1bits.ADNREF = 0;      //ADC negative reference is set to VSS
     ADCON0bits.CHS = 0b00010;   //selecting the AN2 analog channel
-    ADCON1bits.ADCS = 0b010;    //ADC clock set to FOSC/32 (2us convertion time with Fosc = 32MHz)
+    ADCON1bits.ADCS = 0b101;    //ADC clock set to FOSC/16 (1us convertion time with Fosc = 32MHz)
     ADCON1bits.ADFM = 1;        //ADC result is right justified
 
     ADCON0bits.ADON = 1;        //turn ADC on
@@ -81,20 +79,23 @@ void adc_init(void){
 void  NCO1_init(void){
     // sets up the NCO module. the output clock frequency of the module as it
     // is setup below is:
-    // clock_freq = ((NCO_clock_freq * NCO_increment_value) / (2^20)) / 2
+    //
+    // NCO_out_freq = ((NCO_clock_freq * NCO_increment_value) / (2^20)) / 2
+    // the divide by two factor above comes from the 50% duty cycle calc
+    //
     // clock frequency relates to delay time in the memory man:
-    // delay time = (total_BBD_stages / (2 * clock_freq)
+    // delay time = (total_BBD_stages / (2 * BBD_clock_freq)
     NCO1CONbits.N1EN = 0;       //turn off the NCO for config
     
     NCO1CONbits.N1PFM = 0;      //set the NCO output to a fixed 50% duty cycle
-    NCO1CLKbits.N1CKS = 0x00;   //set the NCO clock to the HFINTOSC (16MHz)
+    NCO1CLKbits.N1CKS = 0x01;   //set the NCO clock to the FOSC (32MHz)
     
-    // set the NCO increment value to 255 just to start. this should initialize
-    // the NCO overflow frequency to 3.891kHz. therefore the real output
-    // frequency should be 1.945kHz
+    // set the NCO increment value to 300 just to start. this should initialize
+    // the NCO overflow frequency to 9.155kHz. therefore the real output
+    // frequency should be 4.578kHz
     NCO1INCU = 0x0;
-    NCO1INCH = 0x00;
-    NCO1INCL = 0xFF;
+    NCO1INCH = 0x01;
+    NCO1INCL = 0x2C;
     
     NCO1CONbits.N1EN = 1;       //turn on the NCO
 }
@@ -108,23 +109,15 @@ void CWG_init(void){
     CWG1CON1bits.POLB = 0;          //output B is inverted
     CWG1DATbits.DAT = 0b1001;       //the NCO is the CWG data input
     
-    // shutdown settings
+    // shutdown settings. the defaults in CWG1AS1 are fine for this application
     CWG1AS0bits.CWG1LSAC = 0b01;    //output pins will tri-state in shutdown
     CWG1AS0bits.CWG1LSBD = 0b01;    //output pins will tri-state in shutdown
     CWG1AS0bits.REN = 1;            //auto restart enabled
-    CWG1AS1bits.AS0E = 0;           //auto shutdown from PPS disabled
-    CWG1AS1bits.AS1E = 0;           //auto shutdown from comp 1 disabled
-    CWG1AS1bits.AS2E = 0;           //auto shutdown from comp 2 disabled
-    CWG1AS1bits.AS3E = 0;           //auto shutdown from CLC 2 disabled
-    CWG1AS1bits.AS4E = 0;           //auto shutdown from CLC 3 disabled
     
     CWG1DBRbits.DBR = 0b000010;     //rising dead band is 1-2 HFINTOSC periods
     CWG1DBFbits.DBF = 0b000010;     //falling dead band is 1-2 HFINTOSC periods
     CWG1CLKCONbits.CS = 1;          //the HFINTOSC drives the dead band time
-    CWG1CON0bits.CWG1EN = 1;        //enable the CWG
-    
-    TRISCbits.TRISC4 = 0;           //set RC4 (pin 6) as an output
-    TRISCbits.TRISC5 = 0;           //set RC5 (pin 5) as an output
+    CWG1CON0bits.CWG1EN = 1;        //enable the CWG 1
     
     CWG1AS0bits.SHUTDOWN = 0;       //disable shutdown
 }
@@ -138,125 +131,93 @@ void PPS_init(void){
 }
 
 void timer0_init(void){
-    // timer 0 is used for the tap tempo timing. the clock source is Fosc/4
+    // timer 0 is used for the tap tempo timing. the clock source is the
+    // internal 31kHz oscillator LFINTOSC. the increment rate should be
+    // 1ms, and the timer will overflow after ~65 seconds.
     
     T0CON0bits.T0EN = 0;        //turn off timer 0 for config
     PIR0bits.TMR0IF = 0;        //clear the timer 0 overflow interrupt flag
     
     T0CON0bits.T016BIT = 1;     //timer 0 runs in 16bit mode
-    T0CON0bits.T0OUTPS = 0b111; //timer 0 post scaler set to 1:16
-    T0CON1bits.T0CKPS = 0b111;  //timer 0 prescaler set to 1:128
-    T0CON1bits.T0CS = 0b010;    //timer 0 clock source set to Fosc/4
+    T0CON1bits.T0CKPS = 0b0101; //timer 0 prescaler set to 1:32
+    T0CON0bits.T0OUTPS = 0b0000;//timer 0 post scaler set to 1:1
+    T0CON1bits.T0CS = 0b100;    //timer 0 clock source set to LFINTOSC
     
-    // reset timer 0
-    TMR0H = 0;
-    TMR0L = 0;
-    
-    // the above configures timer 0 such that each count equals 1.024ms. the
-    // overflow interrupt will occur 67.11s after the timer starts
-}
-
-void timer2_init(void){
-    // timer 2 is used to schedule the ADC readings. the clock source is
-    // Fosc / 4
-    T2CONbits.TMR2ON = 0;       //turn off timer 2 for conifg
-    PIR1bits.TMR2IF = 0;        //clear the timer 2 match interrupt flag
-    
-    T2CONbits.T2CKPS = 0b11;    //prescaler set to 1:64
-    T2CONbits.T2OUTPS = 0b1111; //postscaler set to 1:16
-    PR2 = 194;                  //match register set to give a "round" interrupt freq
-    
-    // the above sets the timer 2 match interrupt frequency to
-    // (Fosc / 4) * prescaler * (1 / (PR2)) * postscaler = interrupt freq.
-    // (2MHz) * (1/64) * (1 / (194)) * 1/16 = ~10Hz
-    T2CONbits.TMR2ON = 1;       //turn on timer2
+    T0CON0bits.T0EN = 1;        //turn on timer 0
 }
 
 void timer4_init(void){
-    // timer 4 is used to run the tap tempo button debouncing. the clock source
-    // is Fosc / 4
+    // timer 4 is used to run the tap tempo button debouncing and it schedules
+    // the ADC readings. the clock source is Fosc / 4
     T4CONbits.TMR4ON = 0;       //turn off timer 4 for config
     PIR2bits.TMR4IF = 0;        //clear the timer 4 match interrupt flag
     
     T4CONbits.T4CKPS = 0b10;    //prescaler set to 1:16
-    T4CONbits.T4OUTPS = 0b0111; //postscaler set to 1:8
-    PR4 = 78;
+    T4CONbits.T4OUTPS = 0b1111; //postscaler set to 1:16
+    PR4 = 156;
     
     // the above sets the timer 4 match interrupt frequency to
     // (Fosc / 4) * prescaler * (1 / (PR2)) * postscaler = interrupt freq.
-    // (2MHz) * (1/16) * (1 / (78)) * (1/8) = ~200Hz
+    // (8MHz) * (1/16) * (1 / (156)) * (1/16) = ~200Hz 
     T4CONbits.TMR4ON = 1;       //turn on timer 4
 }
 
-void tmr2_interrupt_handler(void){
+void perform_adc_tasks(void){
     // if the ADC has completed a conversion, write the value into the "results"
-    // register
+    // register. if a new value isn't ready, we can exit early.
     if (ADCON0bits.GO_nDONE == 0){
         adc_result = ADRES;
     }
     ADCON0bits.GO_nDONE = 1;               //start ADC
-    
+
     // no need to write to the NCO if we're in tap tempo mode
     if (tap_tempo_mode){
         return;
     }
     
+    // there needs to be some way to exit tap tempo mode if a user turns the
+    // delay time knob...
+    
     // use the ADC value to drive the NCO frequency by adjusting the increment
-    // register (using only the most-significant 10 bits for now)
-    NCO1INCU = adc_result >> 8;
-    NCO1INCH = adc_result & 0xFF;
-    NCO1INCL = 0xFF;
+    // register
+    NCO1INCU = 0;
+    NCO1INCH = adc_result >> 8 ;
+    NCO1INCL = adc_result;
 }
 
-void tmr4_interrupt_handler(void){
-    // check the status of the tap tempo button, and set the tap tempo positive
-    // edge flag appropriately
-    
-    // run the debounce integrator to filter out mechanical switch bounce.
-    // the button is default high, so the check is for 1 to get us back to
-    // a high state being active
-    if (PORTCbits.RC0 == 1){
-        if (db_integrator > 0){
-            db_integrator--;
-        }
-    } else if (db_integrator < DB_INTEGRATOR_MAX){
-        db_integrator++;
+bit tt_pos_edge_detected(){
+    // this algo by jack ganssle
+    static unsigned char debounce_status = 0;       //current debounce status
+    debounce_status = (debounce_status << 1) | !PORTCbits.RC0 | 0xF0;
+    if (debounce_status == 0xF3){
+        return 1;
     }
-    
-    //find out if we detected a positive edge
-    if ((last_button_state == 0) && (db_integrator >= DB_INTEGRATOR_THRESHOLD)){
-        tt_pos_edge_detected = 1;
-    } else {
-        tt_pos_edge_detected = 0;
-    }   
-    
-    // record the new "last button state"
-    if (db_integrator >= DB_INTEGRATOR_THRESHOLD){
-        last_button_state = 1;       
-    } else {
-        last_button_state = 0;
-    }    
+    return 0;
 }
 
 void compute_write_new_nco_freq(unsigned int time){
-    NCO_increment = (536871 / time);
+    // this operation probably takes forever! i used a cast here to try and
+    // prevent the compiler from choosing a long division method or something
+    NCO_increment = (unsigned short long) (268435 / time);
     
     // establish a lower frequency limit. this limit is, for now, set to just
     // below the lower clock frequency limit on the stock DMM
-    if (NCO_increment < 900){
-        NCO_increment = 900;
+    if (NCO_increment < 300){
+        NCO_increment = 300;
     }
     
     // establish an upper frequency limit. this limit is, for now, set to just
     // above the upper clock frequency limit on the stock DMM
-    if (NCO_increment > 18000){
-        NCO_increment = 18000;
+    if (NCO_increment > 36000){
+        NCO_increment = 36000;
     }
     
-    // split this value up and put it in the NCO increment register
-    NCO1INCU = NCO_increment >> 16;
-    NCO1INCH = (NCO_increment >> 8) & 0xFF;
-    NCO1INCL = NCO_increment & 0xFF;
+    // split this value up and put it in the NCO increment register. no need
+    // to write to the upper four bits since we're not going to run the clock
+    // that fast
+    NCO1INCU = 0;
+    NCO1INCH = NCO_increment >> 8;
+    NCO1INCL = NCO_increment & 0x00FF;
 }
 
 void calc_tap_tempo(void){
@@ -265,43 +226,48 @@ void calc_tap_tempo(void){
     // when the button is pushed for the first time in a while, we have to turn 
     // on timer 0 and tell the rest of the program we're doing a tap tempo
     if (tap_tempo_mode == 0){
-        T0CON0bits.T0EN = 1;        //turn on timer 0
+        // reset timer 0. one must write to TMR0H first and then TMR0L due to
+        // the way the timer 0 high byte buffer works
+        TMR0H = 0;              
+        TMR0L = 0;
         tap_tempo_mode = 1;         //set the tap tempo flag
+        last_tap_time = 0;          //since we're starting from scratch
         return;                     //leave early on the first button push
     }
 
     // after the first button push, we have to store how long it has been
     // since the last button push
-    low_timer0_byte = TMR0L;
-    high_timer0_byte = TMR0H;
-    current_tap_time = (high_timer0_byte << 8) + low_timer0_byte;
+    current_tap_time = ((TMR0H << 8 ) + TMR0L);
     
-    // determine the time in milliseconds between the current tap and the last
-    // tap
-    delay_time = (current_tap_time + last_tap_time) / 2;
+    // average the last two tap times to smooth the results a bit. also apply
+    // a correction to the delay time number since timer0 runs at 31kHz. the
+    // long version of this line would be "divide by two and multiply by 1.032"
+    delay_time = (current_tap_time + last_tap_time) * 0.516;
     
-    // ignore the delay time if it's too long (limit set to 1 second for now).
+    // ignore the delay time if it's too long (limit set to 10 seconds for now).
     // otherwise write a new value to the NCO
-    if (delay_time < 1000){
+    if (delay_time < 10000){
         compute_write_new_nco_freq(delay_time);
+    } else {
+        tap_tempo_mode = 0;         //exit tap tempo mode
     }
     
-    // reset timer 0
-    TMR0H = 0;
-    TMR0L = 0;
-    
-    // overwrite the last tap time with the latest one
+    //overwrite the last tap time with the new one
     last_tap_time = current_tap_time;
+    
+    // reset our millisecond counter
+    TMR0H = 0;              
+    TMR0L = 0;
 }
 
 void main(void) {
-    // configure the internal clock to run at 16MHz. this means that the
-    // instruction clock will run at 2MHz (Fosc/4)
+    // configure the internal clock to run at 32MHz. this means that the
+    // instruction clock will run at 8MHz (Fosc/4)
     OSCCON1bits.NOSC = 0b000;   //set the "new osc" source to HFINTC w/ 2x PLL
-    OSCFRQbits.HFFRQ = 0b0100;  //set the HFINTOSC to 8MHz
+    OSCFRQbits.HFFRQ = 0b0110;  //set the HFINTOSC to 16MHz
 
     // configure the watchdog timer
-    WDTCONbits.WDTPS = 0b01011; //set to 2s timer
+    //WDTCONbits.WDTPS = 0b01011; //set to 2s timer
     
     // configure the inputs and outputs
     TRISAbits.TRISA2 = 1;       //set RA2 (pin 11) as input (analog input for "speed" pot)
@@ -309,8 +275,8 @@ void main(void) {
     TRISCbits.TRISC1 = 0;       //set RC1 (pin 9) as output
     TRISCbits.TRISC2 = 0;       //set RC2 (pin 8) as output
     TRISCbits.TRISC3 = 0;       //set RC3 (pin 7) as an output
-    TRISCbits.TRISC4 = 0;       //set RC4 (pin 6) as an output
-    TRISCbits.TRISC5 = 0;       //set RC5 (pin 5) as an output
+    TRISCbits.TRISC4 = 0;       //set RC4 (pin 6) as an output (for pos clock out)
+    TRISCbits.TRISC5 = 0;       //set RC5 (pin 5) as an output (for neg clock out)
     ANSELA = 0b00000100;        //set RA2 (pin 11) as an analog input (AN2 channel))
     ANSELC = 0b00000000;        //nothing on port C is an analog input
     
@@ -319,48 +285,54 @@ void main(void) {
     NCO1_init();              //configure the NCO
     CWG_init();               //configure the complementary waveform generator
     PPS_init();               //assign peripherals to pins
-    timer0_init();            //setup timer 0
-    timer2_init();            //setup and turn on timer 2
+    timer0_init();            //setup timer 0 (does not turn timer 0 on)
     timer4_init();            //setup and turn on timer 4
     
-     // turn on interrupts
-    PIE0bits.TMR0IE = 1;      //enable the timer 0 overflow interrupt
-    PIE1bits.TMR2IE = 1;      //enable the timer 2 to PR2 match interrupt
-    PIE2bits.TMR4IE =  1;     //enable the timer 4 to PR2 match interrupt
+    // turn on interrupts
+    PIE0bits.TMR0IE = 0;      //disable timer 0 overflow interrupt
+    PIE2bits.TMR4IE =  1;     //enable the timer 4 to PR4 match interrupt
     INTCONbits.PEIE = 1;      //enable peripheral interrupts
     INTCONbits.GIE = 1;       //general interrupts enabled
     
     LATC = 0x00;              //init the port c latches
     LATCbits.LATC2 = 0;       //just to tell the user that the program started        
-        
+    
+    // below is the main loop
     while(1){
         CLRWDT();               //clear the Watchdog Timer to keep the PIC from
                                 //resetting
-
-        if (tt_pos_edge_detected){
+        
+        // if the debounce routine found a positive edge, then we must do the
+        // tap tempo math
+        if (calc_tap_tempo_flag){
+            LATCbits.LATC2 = 1;             //i want to see it!
             calc_tap_tempo();
-            tt_pos_edge_detected = 0;
+            LATCbits.LATC2 = 0;
+            calc_tap_tempo_flag = 0;       //reset the flag
+        }
+        
+        // if it's time to read the ADC, do so and see if we need to update
+        // the NCO based on the ADC reading.
+        if (adc_timing_flag){
+            perform_adc_tasks();
+            adc_timing_flag = 0;            //reset the flag
         }
     }
     return;
 }
 
 void interrupt ISR(void){
-    // check for timer 0 overflow interrupt
-    if (PIR0bits.TMR0IF == 1){
-        T0CON0bits.T0EN = 0;                 //turn off timer 0
-        PIR0bits.TMR0IF = 0;                 //reset the interrupt flag
-    }
-    
-    // check for timer 2 to PR2 match interrupt
-    if(PIR1bits.TMR2IF == 1){
-        tmr2_interrupt_handler();
-        PIR1bits.TMR2IF = 0;                 //reset the interrupt flag
-    }
-    
-    // check fir time 4 to PR4 match interrupt
+  
+    // check for timer 4 to PR4 match interrupt
     if(PIR2bits.TMR4IF == 1){
-        tmr4_interrupt_handler();
+        // tell the main loop that it's time to read the tap tempo button input
+        if (tt_pos_edge_detected()){
+            calc_tap_tempo_flag = 1;
+        }
+    
+        // tell the main loop that it's time to read the ADC
+        adc_timing_flag = 1;
+        
         PIR2bits.TMR4IF = 0;                 //reset the interrupt flag
     }
     
