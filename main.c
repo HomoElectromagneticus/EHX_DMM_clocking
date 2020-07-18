@@ -50,15 +50,16 @@
 #include <xc.h>
 
 // variables for the ADC
-unsigned int adc_result = 0;            //this is where the ADC value will be stored
-volatile bit adc_timing_flag = 0;      //signal to tell the program to run the ADC routine
+volatile bit adc_timing_flag = 0;       //signal to tell the program to run the ADC routine
+unsigned int current_adc_result = 0;    //this is where the ADC value will be stored
+unsigned int old_adc_result = 0;       //the last ADC reading
 
 // variables for the tap tempo delay time calculation
 volatile bit calc_tap_tempo_flag = 0;   //sign that we need to compute tempo
-volatile bit tap_tempo_mode = 0;        //are we in tap tempo mode or not?
+volatile bit tap_tempo_mode = 0;        //are we in tap tempo mode?
 unsigned int last_tap_time = 0;
 unsigned int current_tap_time = 0;
-unsigned int delay_time = 0;
+unsigned int avg_delay_time = 0;
 
 unsigned short long NCO_increment = 0;
 
@@ -164,29 +165,38 @@ void timer4_init(void){
 
 void perform_adc_tasks(void){
     // if the ADC has completed a conversion, write the value into the "results"
-    // register. if a new value isn't ready, we can exit early.
+    // register
     if (ADCON0bits.GO_nDONE == 0){
-        adc_result = ADRES;
+        current_adc_result = ADRES;
     }
     ADCON0bits.GO_nDONE = 1;               //start ADC
 
-    // no need to write to the NCO if we're in tap tempo mode
+    // no need to write to the NCO from the ADC if we're in tap tempo mode. but
+    // if we are in tap tempo mode and the knob position changes, then we should
+    // exit tap tempo mode and prioritize defining the delay time with the knob
     if (tap_tempo_mode){
+        if ( (current_adc_result >= (old_adc_result + 10)) | (current_adc_result <= (old_adc_result - 10)) ){
+            tap_tempo_mode = 0;
+        } else {
         return;
+        }
     }
     
-    // there needs to be some way to exit tap tempo mode if a user turns the
-    // delay time knob...
-    
+    // right here, there should be a way to map the raw ADC readings to the
+    // BBD clock frequencies used by the original DMM...
+
     // use the ADC value to drive the NCO frequency by adjusting the increment
     // register
     NCO1INCU = 0;
-    NCO1INCH = adc_result >> 8 ;
-    NCO1INCL = adc_result;
+    NCO1INCH = current_adc_result >> 8 ;
+    NCO1INCL = current_adc_result;
+    
+    old_adc_result = current_adc_result;
 }
 
 bit tt_pos_edge_detected(){
-    // this algo by jack ganssle
+    // this algo by jack ganssle. returns true if a positive edge has been
+    // detected from the tap tempo button. 
     static unsigned char debounce_status = 0;       //current debounce status
     debounce_status = (debounce_status << 1) | !PORTCbits.RC0 | 0xF0;
     if (debounce_status == 0xF3){
@@ -196,14 +206,16 @@ bit tt_pos_edge_detected(){
 }
 
 void compute_write_new_nco_freq(unsigned int time){
-    // this operation probably takes forever! i used a cast here to try and
-    // prevent the compiler from choosing a long division method or something
-    NCO_increment = (unsigned short long) (268435 / time);
+    // this line converts the delay time between tap tempo button presses into
+    // the appropriate NCO increment value. the line also compensates for the
+    // fact that each tick of timer 0 only counts for 0.969ms - the input clock
+    // for timer 0 runs at 31KHz, not 32KHz!
+    NCO_increment = (unsigned short long) 260111.88 / time;
     
     // establish a lower frequency limit. this limit is, for now, set to just
     // below the lower clock frequency limit on the stock DMM
-    if (NCO_increment < 300){
-        NCO_increment = 300;
+    if (NCO_increment < 450){
+        NCO_increment = 450;
     }
     
     // establish an upper frequency limit. this limit is, for now, set to just
@@ -212,12 +224,10 @@ void compute_write_new_nco_freq(unsigned int time){
         NCO_increment = 36000;
     }
     
-    // split this value up and put it in the NCO increment register. no need
-    // to write to the upper four bits since we're not going to run the clock
-    // that fast
-    NCO1INCU = 0;
+    // split this increment value up and put it in the NCO increment register
+    NCO1INCU = NCO_increment >> 16;
     NCO1INCH = NCO_increment >> 8;
-    NCO1INCL = NCO_increment & 0x00FF;
+    NCO1INCL = NCO_increment;
 }
 
 void calc_tap_tempo(void){
@@ -239,17 +249,16 @@ void calc_tap_tempo(void){
     // since the last button push
     current_tap_time = ((TMR0H << 8 ) + TMR0L);
     
-    // average the last two tap times to smooth the results a bit. also apply
-    // a correction to the delay time number since timer0 runs at 31kHz. the
-    // long version of this line would be "divide by two and multiply by 1.032"
-    delay_time = (current_tap_time + last_tap_time) * 0.516;
+    // average the last two tap times to smooth the results a bit
+    avg_delay_time = (current_tap_time + last_tap_time) / 2;
     
-    // ignore the delay time if it's too long (limit set to 10 seconds for now).
+    // ignore the delay time if it's too long (limit set to 5 seconds for now).
     // otherwise write a new value to the NCO
-    if (delay_time < 10000){
-        compute_write_new_nco_freq(delay_time);
+    if (avg_delay_time < 5000){
+        compute_write_new_nco_freq(avg_delay_time);
     } else {
         tap_tempo_mode = 0;         //exit tap tempo mode
+        return;
     }
     
     //overwrite the last tap time with the new one
@@ -263,7 +272,7 @@ void calc_tap_tempo(void){
 void main(void) {
     // configure the internal clock to run at 32MHz. this means that the
     // instruction clock will run at 8MHz (Fosc/4)
-    OSCCON1bits.NOSC = 0b000;   //set the "new osc" source to HFINTC w/ 2x PLL
+    OSCCON1bits.NOSC = 0b000;   //set the "new osc" source to HFINTOSC w/ 2x PLL
     OSCFRQbits.HFFRQ = 0b0110;  //set the HFINTOSC to 16MHz
 
     // configure the watchdog timer
@@ -285,11 +294,10 @@ void main(void) {
     NCO1_init();              //configure the NCO
     CWG_init();               //configure the complementary waveform generator
     PPS_init();               //assign peripherals to pins
-    timer0_init();            //setup timer 0 (does not turn timer 0 on)
+    timer0_init();            //setup timer 0 and turn it on
     timer4_init();            //setup and turn on timer 4
     
     // turn on interrupts
-    PIE0bits.TMR0IE = 0;      //disable timer 0 overflow interrupt
     PIE2bits.TMR4IE =  1;     //enable the timer 4 to PR4 match interrupt
     INTCONbits.PEIE = 1;      //enable peripheral interrupts
     INTCONbits.GIE = 1;       //general interrupts enabled
