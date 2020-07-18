@@ -71,7 +71,7 @@ void adc_init(void){
     ADCON1bits.ADPREF = 0b00;   //ADC positive reference is set to VDD
     ADCON1bits.ADNREF = 0;      //ADC negative reference is set to VSS
     ADCON0bits.CHS = 0b00010;   //selecting the AN2 analog channel
-    ADCON1bits.ADCS = 0b101;    //ADC clock set to FOSC/16 (1us convertion time with Fosc = 32MHz)
+    ADCON1bits.ADCS = 0b010;    //ADC clock set to FOSC/32 (1us convertion time with Fosc = 32MHz)
     ADCON1bits.ADFM = 1;        //ADC result is right justified
 
     ADCON0bits.ADON = 1;        //turn ADC on
