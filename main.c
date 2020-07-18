@@ -61,7 +61,8 @@ unsigned int last_tap_time = 0;
 unsigned int current_tap_time = 0;
 unsigned int avg_delay_time = 0;
 
-unsigned short long NCO_increment = 0;
+unsigned short long NCO_increment_tt = 0;
+unsigned short long NCO_increment_adc = 0;
 
 
 void adc_init(void){
@@ -182,14 +183,15 @@ void perform_adc_tasks(void){
         }
     }
     
-    // right here, there should be a way to map the raw ADC readings to the
-    // BBD clock frequencies used by the original DMM...
+    // scale the ADC readings into NCO increment values that correspond to the
+    // DMM's original delay time knob range
+    NCO_increment_adc = (8 * current_adc_result) + 459;
 
     // use the ADC value to drive the NCO frequency by adjusting the increment
     // register
-    NCO1INCU = 0;
-    NCO1INCH = current_adc_result >> 8 ;
-    NCO1INCL = current_adc_result;
+    NCO1INCU = NCO_increment_adc >> 16;
+    NCO1INCH = NCO_increment_adc >> 8 ;
+    NCO1INCL = NCO_increment_adc;
     
     old_adc_result = current_adc_result;
 }
@@ -210,24 +212,24 @@ void compute_write_new_nco_freq(unsigned int time){
     // the appropriate NCO increment value. the line also compensates for the
     // fact that each tick of timer 0 only counts for 0.969ms - the input clock
     // for timer 0 runs at 31KHz, not 32KHz!
-    NCO_increment = (unsigned short long) 260111.88 / time;
+    NCO_increment_tt = (unsigned short long) 260111.88 / time;
     
     // establish a lower frequency limit. this limit is, for now, set to just
     // below the lower clock frequency limit on the stock DMM
-    if (NCO_increment < 450){
-        NCO_increment = 450;
+    if (NCO_increment_tt < 450){
+        NCO_increment_tt = 450;
     }
     
     // establish an upper frequency limit. this limit is, for now, set to just
     // above the upper clock frequency limit on the stock DMM
-    if (NCO_increment > 36000){
-        NCO_increment = 36000;
+    if (NCO_increment_tt > 36000){
+        NCO_increment_tt = 36000;
     }
     
     // split this increment value up and put it in the NCO increment register
-    NCO1INCU = NCO_increment >> 16;
-    NCO1INCH = NCO_increment >> 8;
-    NCO1INCL = NCO_increment;
+    NCO1INCU = NCO_increment_tt >> 16;
+    NCO1INCH = NCO_increment_tt >> 8;
+    NCO1INCL = NCO_increment_tt;
 }
 
 void calc_tap_tempo(void){
