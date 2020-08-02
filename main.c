@@ -8,8 +8,8 @@
  *               ---|2 / RA5   RA0 / 13|---
  *               ---|3 / RA4   RA1 / 12|---
  *               ---|4 / RA3   RA2 / 11|--- delay time knob input
- *     clk out+  ---|5 / RC5   RC0 / 10|--- tap tempo button input
- *     clk out-  ---|6 / RC4   RC1 /  9|--- 
+ *     clk out+  ---|5 / RC5   RC0 / 10|--- chorus amount knob input
+ *     clk out-  ---|6 / RC4   RC1 /  9|--- tap tempo button input
  *               ---|7 / RC3   RC2 /  8|--- "on" light
  *                   ------------------
  * 
@@ -51,9 +51,11 @@
 
 // variables for the ADC
 volatile bit adc_timing_flag = 0;       //signal to tell the program to run the ADC routine
-unsigned int adc_result = 0;            //holding register for the adc result
-unsigned int current_adc_result = 0;    //this is where the ADC value will be stored
-unsigned int old_adc_result = 0;        //the last ADC reading
+volatile bit new_dly_knb_result = 0;            //flag to let us a knob if there's a new dly knob reading
+unsigned int dly_knb_adc_result = 0;            //holding register for the delay knob adc result
+unsigned int current_dly_knb_adc_result = 0;    //latest value from delay knob
+unsigned int old_dly_knb_adc_result = 0;        //old value from delay knob
+unsigned int cho_knb_adc_result = 0;            //holding register for the chorus knob adc result
 
 // variables for the tap tempo delay time calculation
 volatile bit calc_tap_tempo_flag = 0;   //sign that we need to compute tempo
@@ -72,8 +74,8 @@ void adc_init(void){
     
     ADCON1bits.ADPREF = 0b00;   //ADC positive reference is set to VDD
     ADCON1bits.ADNREF = 0;      //ADC negative reference is set to VSS
-    ADCON0bits.CHS = 0b00010;   //selecting the AN2 analog channel
-    ADCON1bits.ADCS = 0b010;    //ADC clock set to FOSC/32 (1us convertion time with Fosc = 32MHz)
+    ADCON0bits.CHS = 0b00010;   //selecting A2 as the input analog channel
+    ADCON1bits.ADCS = 0b110;    //ADC clock set to FOSC/64 (2us convertion time with Fosc = 32MHz)
     ADCON1bits.ADFM = 1;        //ADC result is right justified
 
     ADCON0bits.ADON = 1;        //turn ADC on
@@ -165,20 +167,32 @@ void timer4_init(void){
     T4CONbits.TMR4ON = 1;       //turn on timer 4
 }
 
-void get_adc_reading(){
-    // if the ADC has completed a conversion, write the result to the
-    // "adc_result" variable
+void update_adc_readings(){
+    // if the ADC has completed a conversion, write the result to whichever
+    // holding variable is "up next" depending on what channel has been 
+    // prepared. also prepare the "other" channel if a conversion on one channel
+    // is ready
+    
+    // has the ADC finished a conversion?
     if (ADCON0bits.GO_nDONE == 0){
-        adc_result = ADRES;
+        // if the delay knob has been chosen as the input
+        if (ADCON0bits.CHS == 0b00010){
+            dly_knb_adc_result = ADRES;
+            ADCON0bits.CHS = 0b010000;  //switch the channel to the chorus amount
+            new_dly_knb_result = 1;     //let us know a new delay knob value is available
+        // if the chorus amount knob has been chosen as the input
+        } else if (ADCON0bits.CHS == 0b010000){
+            cho_knb_adc_result = ADRES;
+            ADCON0bits.CHS = 0b00010;   //switch the channel to the delay time
+        }
     }
-    ADCON0bits.GO_nDONE = 1;               //start ADC
 }
 
 bit tt_pos_edge_detected(){
     // this algo by jack ganssle. returns true if a positive edge has been
     // detected from the tap tempo button. 
     static unsigned char debounce_status = 0;       //current debounce status
-    debounce_status = (debounce_status << 1) | !PORTCbits.RC0 | 0xF0;
+    debounce_status = (debounce_status << 1) | !PORTCbits.RC1 | 0xF0;
     if (debounce_status == 0xF3){
         return 1;
     }
@@ -265,15 +279,15 @@ void main(void) {
     //WDTCONbits.WDTPS = 0b01011; //set to 2s timer
     
     // configure the inputs and outputs
-    TRISAbits.TRISA2 = 1;       //set RA2 (pin 11) as input (analog input for "speed" pot)
-    TRISCbits.TRISC0 = 1;       //set RC0 (pin 10) as input (for tap tempo button)
-    TRISCbits.TRISC1 = 0;       //set RC1 (pin 9) as output
+    TRISAbits.TRISA2 = 1;       //set RA2 (pin 11) as input (analog input for "delay time" pot)
+    TRISCbits.TRISC0 = 1;       //set RC0 (pin 10) as input (analog input for "chorus amount" pot)
+    TRISCbits.TRISC1 = 1;       //set RC1 (pin 9) as input (digital for tap tempo button)
     TRISCbits.TRISC2 = 0;       //set RC2 (pin 8) as output
     TRISCbits.TRISC3 = 0;       //set RC3 (pin 7) as an output
     TRISCbits.TRISC4 = 0;       //set RC4 (pin 6) as an output (for pos clock out)
     TRISCbits.TRISC5 = 0;       //set RC5 (pin 5) as an output (for neg clock out)
     ANSELA = 0b00000100;        //set RA2 (pin 11) as an analog input (AN2 channel))
-    ANSELC = 0b00000000;        //nothing on port C is an analog input
+    ANSELC = 0b00000001;        //set RC0 (pin 10) as an analog input
     
     // configure the internal peripherals
     adc_init();               //configure the ADC
@@ -309,28 +323,28 @@ void main(void) {
                delay_time = calc_tap_tempo(); 
             }
             calc_tap_tempo_flag = 0;       //reset the flag
-        }
+        }        
         
-        // if it's time to read the ADC, do so and see if we need to update
-        // the NCO based on the ADC reading.
-        if (adc_timing_flag){
-            get_adc_reading();
-            current_adc_result = adc_result;
+        // if there's a new reading available from the delay time knob, check
+        // to see if we need to use and act accordingly
+        if (new_dly_knb_result) {
+            current_dly_knb_adc_result = dly_knb_adc_result;
             // if we're in tap tempo mode, we should only use the delay time
             // knob to change the delay time if the knob has turned since the
             // last time we looked
-            if (tap_tempo_mode){
-                if ( (current_adc_result >= (old_adc_result + 10)) | (current_adc_result <= (old_adc_result - 10)) ){
+            if (tap_tempo_mode) {
+                if ( (current_dly_knb_adc_result >= (old_dly_knb_adc_result + 5)) 
+                        | (current_dly_knb_adc_result <= (old_dly_knb_adc_result - 5)) ){
                     tap_tempo_mode = 0;     //exit tap tempo if the knob moved
-                    delay_time = delay_time_from_delay_knob(current_adc_result);
+                    delay_time = delay_time_from_delay_knob(current_dly_knb_adc_result);
                 }
             // if we're not in tap tempo mode, than we can directly write a new
             // delay time from the delay time knob reading
             } else {
-                delay_time = delay_time_from_delay_knob(current_adc_result);
+                delay_time = delay_time_from_delay_knob(current_dly_knb_adc_result);
             }
-            old_adc_result = current_adc_result;
-            adc_timing_flag = 0;            //reset the flag
+            old_dly_knb_adc_result = current_dly_knb_adc_result;
+            new_dly_knb_result = 0;            //reset the flag
         }
         
         // update the NCO based on the delay time
@@ -349,9 +363,17 @@ void interrupt ISR(void){
             calc_tap_tempo_flag = 1;
         }
     
-        // tell the main loop that it's time to read the ADC
-        adc_timing_flag = 1;
-        
+        // read the ADC if it's time. note that the language below causes each
+        // knob to be read at 50Hz due to the ADC channel switching and the way
+        // ADC reads are initiated every other time timer4 matches PR4
+        if (adc_timing_flag) {
+            update_adc_readings();
+            adc_timing_flag = 0;
+        } else {
+            ADCON0bits.GO_nDONE = 1;               //start ADC
+            adc_timing_flag = 1;    //so that the next time we do a read
+        }
+   
         PIR2bits.TMR4IF = 0;                 //reset the interrupt flag
     }
     
