@@ -63,8 +63,7 @@ unsigned int current_tap_time = 0;
 
 // variables for the NCO
 unsigned int delay_time = 0;
-unsigned short long NCO_increment_tt = 0;
-unsigned short long NCO_increment_adc = 0;
+unsigned short long NCO_increment = 0;
 
 
 void adc_init(void){
@@ -191,24 +190,24 @@ void compute_write_new_nco_freq(unsigned int time){
     // the appropriate NCO increment value. the line also compensates for the
     // fact that each tick of timer 0 only counts for 0.969ms - the input clock
     // for timer 0 runs at 31KHz, not 32KHz!
-    NCO_increment_tt = (unsigned short long) 260111.88 / time;
+    NCO_increment = (unsigned short long) 260111.88 / time;
     
     // establish a lower frequency limit. this limit is, for now, set to just
     // below the lower clock frequency limit on the stock DMM
-    if (NCO_increment_tt < 450){
-        NCO_increment_tt = 450;
+    if (NCO_increment < 450){
+        NCO_increment = 450;
     }
     
     // establish an upper frequency limit. this limit is, for now, set to just
     // above the upper clock frequency limit on the stock DMM
-    if (NCO_increment_tt > 36000){
-        NCO_increment_tt = 36000;
+    if (NCO_increment > 36000){
+        NCO_increment = 36000;
     }
     
     // split this increment value up and put it in the NCO increment register
-    NCO1INCU = NCO_increment_tt >> 16;
-    NCO1INCH = NCO_increment_tt >> 8;
-    NCO1INCL = NCO_increment_tt;
+    NCO1INCU = NCO_increment >> 16;
+    NCO1INCH = NCO_increment >> 8;
+    NCO1INCL = NCO_increment;
 }
 
 void init_tap_tempo(void){
