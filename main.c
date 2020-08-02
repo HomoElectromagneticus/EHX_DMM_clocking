@@ -7,7 +7,7 @@
  *           VDD ---|1               14|--- VSS
  *               ---|2 / RA5   RA0 / 13|---
  *               ---|3 / RA4   RA1 / 12|---
- *               ---|4 / RA3   RA2 / 11|--- potentiometer input
+ *               ---|4 / RA3   RA2 / 11|--- delay time knob input
  *     clk out+  ---|5 / RC5   RC0 / 10|--- tap tempo button input
  *     clk out-  ---|6 / RC4   RC1 /  9|--- 
  *               ---|7 / RC3   RC2 /  8|--- "on" light
@@ -51,16 +51,18 @@
 
 // variables for the ADC
 volatile bit adc_timing_flag = 0;       //signal to tell the program to run the ADC routine
+unsigned int adc_result = 0;            //holding register for the adc result
 unsigned int current_adc_result = 0;    //this is where the ADC value will be stored
-unsigned int old_adc_result = 0;       //the last ADC reading
+unsigned int old_adc_result = 0;        //the last ADC reading
 
 // variables for the tap tempo delay time calculation
 volatile bit calc_tap_tempo_flag = 0;   //sign that we need to compute tempo
 volatile bit tap_tempo_mode = 0;        //are we in tap tempo mode?
 unsigned int last_tap_time = 0;
 unsigned int current_tap_time = 0;
-unsigned int avg_delay_time = 0;
 
+// variables for the NCO
+unsigned int delay_time = 0;
 unsigned short long NCO_increment_tt = 0;
 unsigned short long NCO_increment_adc = 0;
 
@@ -164,36 +166,13 @@ void timer4_init(void){
     T4CONbits.TMR4ON = 1;       //turn on timer 4
 }
 
-void perform_adc_tasks(void){
-    // if the ADC has completed a conversion, write the value into the "results"
-    // register
+void get_adc_reading(){
+    // if the ADC has completed a conversion, write the result to the
+    // "adc_result" variable
     if (ADCON0bits.GO_nDONE == 0){
-        current_adc_result = ADRES;
+        adc_result = ADRES;
     }
     ADCON0bits.GO_nDONE = 1;               //start ADC
-
-    // no need to write to the NCO from the ADC if we're in tap tempo mode. but
-    // if we are in tap tempo mode and the knob position changes, then we should
-    // exit tap tempo mode and prioritize defining the delay time with the knob
-    if (tap_tempo_mode){
-        if ( (current_adc_result >= (old_adc_result + 10)) | (current_adc_result <= (old_adc_result - 10)) ){
-            tap_tempo_mode = 0;
-        } else {
-        return;
-        }
-    }
-    
-    // scale the ADC readings into NCO increment values that correspond to the
-    // DMM's original delay time knob range
-    NCO_increment_adc = (8 * current_adc_result) + 459;
-
-    // use the ADC value to drive the NCO frequency by adjusting the increment
-    // register
-    NCO1INCU = NCO_increment_adc >> 16;
-    NCO1INCH = NCO_increment_adc >> 8 ;
-    NCO1INCL = NCO_increment_adc;
-    
-    old_adc_result = current_adc_result;
 }
 
 bit tt_pos_edge_detected(){
@@ -232,43 +211,49 @@ void compute_write_new_nco_freq(unsigned int time){
     NCO1INCL = NCO_increment_tt;
 }
 
-void calc_tap_tempo(void){
+void init_tap_tempo(void){
+    // reset timer 0. one must write to TMR0H first and then TMR0L due to
+    // the way the timer 0 high byte buffer works
+    TMR0H = 0;              
+    TMR0L = 0;
+    tap_tempo_mode = 1;         //set the tap tempo flag
+    last_tap_time = 0;          //since we're starting from scratch
+}
+
+unsigned int calc_tap_tempo(){
     // here is where we figure out how to set the NCO clock based on the tap
     // tempo signal
-    // when the button is pushed for the first time in a while, we have to turn 
-    // on timer 0 and tell the rest of the program we're doing a tap tempo
-    if (tap_tempo_mode == 0){
-        // reset timer 0. one must write to TMR0H first and then TMR0L due to
-        // the way the timer 0 high byte buffer works
-        TMR0H = 0;              
-        TMR0L = 0;
-        tap_tempo_mode = 1;         //set the tap tempo flag
-        last_tap_time = 0;          //since we're starting from scratch
-        return;                     //leave early on the first button push
-    }
+    
+    unsigned int new_delay_time;
 
     // after the first button push, we have to store how long it has been
     // since the last button push
-    current_tap_time = ((TMR0H << 8 ) + TMR0L);
+    current_tap_time = (unsigned int) ((TMR0H << 8 ) + TMR0L);
     
     // average the last two tap times to smooth the results a bit
-    avg_delay_time = (current_tap_time + last_tap_time) / 2;
+    new_delay_time = (current_tap_time + last_tap_time) / 2;
     
     // ignore the delay time if it's too long (limit set to 5 seconds for now).
     // otherwise write a new value to the NCO
-    if (avg_delay_time < 5000){
-        compute_write_new_nco_freq(avg_delay_time);
-    } else {
+    if (new_delay_time > 5000){
         tap_tempo_mode = 0;         //exit tap tempo mode
-        return;
+        return delay_time;          //we return the old delay time
     }
     
     //overwrite the last tap time with the new one
     last_tap_time = current_tap_time;
     
-    // reset our millisecond counter
+    // reset our millisecond counter (timer 0). well millisecond ish...
     TMR0H = 0;              
     TMR0L = 0;
+    
+    return new_delay_time;
+}
+
+unsigned int delay_time_from_delay_knob(unsigned int adc_reading){
+    // scale the ADC readings into NCO increment values that correspond to the
+    // DMM's original delay time knob range
+    return 542 - (adc_reading / 2);
 }
 
 void main(void) {
@@ -305,28 +290,53 @@ void main(void) {
     INTCONbits.GIE = 1;       //general interrupts enabled
     
     LATC = 0x00;              //init the port c latches
-    LATCbits.LATC2 = 0;       //just to tell the user that the program started        
+    LATCbits.LATC2 = 1;       //just to tell the user that the program started        
     
     // below is the main loop
     while(1){
         CLRWDT();               //clear the Watchdog Timer to keep the PIC from
                                 //resetting
-        
+ 
         // if the debounce routine found a positive edge, then we must do the
         // tap tempo math
         if (calc_tap_tempo_flag){
-            LATCbits.LATC2 = 1;             //i want to see it!
-            calc_tap_tempo();
-            LATCbits.LATC2 = 0;
+            // if we caught a positive edge but are not in tap tempo mode, then
+            // we need to initialize the tap tempo bits
+            if (!tap_tempo_mode){
+                init_tap_tempo();
+            // if we caught a positive edge and are already in tap tempo mode,
+            // then we can calculate the delay time
+            } else {
+               delay_time = calc_tap_tempo(); 
+            }
             calc_tap_tempo_flag = 0;       //reset the flag
         }
         
         // if it's time to read the ADC, do so and see if we need to update
         // the NCO based on the ADC reading.
         if (adc_timing_flag){
-            perform_adc_tasks();
+            get_adc_reading();
+            current_adc_result = adc_result;
+            // if we're in tap tempo mode, we should only use the delay time
+            // knob to change the delay time if the knob has turned since the
+            // last time we looked
+            if (tap_tempo_mode){
+                if ( (current_adc_result >= (old_adc_result + 10)) | (current_adc_result <= (old_adc_result - 10)) ){
+                    tap_tempo_mode = 0;     //exit tap tempo if the knob moved
+                    delay_time = delay_time_from_delay_knob(current_adc_result);
+                }
+            // if we're not in tap tempo mode, than we can directly write a new
+            // delay time from the delay time knob reading
+            } else {
+                delay_time = delay_time_from_delay_knob(current_adc_result);
+            }
+            old_adc_result = current_adc_result;
             adc_timing_flag = 0;            //reset the flag
         }
+        
+        // update the NCO based on the delay time
+        compute_write_new_nco_freq(delay_time);
+        
     }
     return;
 }
