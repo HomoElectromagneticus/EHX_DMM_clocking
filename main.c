@@ -57,6 +57,11 @@ unsigned int current_dly_knb_adc_result = 0;    //latest value from delay knob
 unsigned int old_dly_knb_adc_result = 0;        //old value from delay knob
 unsigned int cho_knb_adc_result = 0;            //holding register for the chorus knob adc result
 
+//variables for the chorus LFO
+signed float chorus_LFO = 0;              //holds the current value of the chorus LFO
+                                          //sort of a phase accumulator
+signed float chorus_LFO_dir = 0.01;       //controls the chorus LFO wave's direction
+
 // variables for the tap tempo delay time calculation
 volatile bit calc_tap_tempo_flag = 0;   //sign that we need to compute tempo
 volatile bit tap_tempo_mode = 0;        //are we in tap tempo mode?
@@ -93,11 +98,11 @@ void  NCO1_init(void){
     NCO1CONbits.N1EN = 0;       //turn off the NCO for config
     
     NCO1CONbits.N1PFM = 0;      //set the NCO output to a fixed 50% duty cycle
-    NCO1CLKbits.N1CKS = 0x01;   //set the NCO clock to the FOSC (32MHz)
+    NCO1CLKbits.N1CKS = 0x00;   //set the NCO clock to the HFINTOSC (16MHz)
     
     // set the NCO increment value to 300 just to start. this should initialize
-    // the NCO overflow frequency to 9.155kHz. therefore the real output
-    // frequency should be 4.578kHz
+    // the NCO overflow frequency to ~4.58kHz. therefore the real output
+    // frequency should be ~2.29kHz
     NCO1INCU = 0x0;
     NCO1INCH = 0x01;
     NCO1INCL = 0x2C;
@@ -119,8 +124,8 @@ void CWG_init(void){
     CWG1AS0bits.CWG1LSBD = 0b01;    //output pins will tri-state in shutdown
     CWG1AS0bits.REN = 1;            //auto restart enabled
     
-    CWG1DBRbits.DBR = 0b000010;     //rising dead band is 1-2 HFINTOSC periods
-    CWG1DBFbits.DBF = 0b000010;     //falling dead band is 1-2 HFINTOSC periods
+    CWG1DBRbits.DBR = 0b000001;     //rising dead band is 1-2 HFINTOSC periods
+    CWG1DBFbits.DBF = 0b000001;     //falling dead band is 1-2 HFINTOSC periods
     CWG1CLKCONbits.CS = 1;          //the HFINTOSC drives the dead band time
     CWG1CON0bits.CWG1EN = 1;        //enable the CWG 1
     
@@ -149,6 +154,21 @@ void timer0_init(void){
     T0CON1bits.T0CS = 0b100;    //timer 0 clock source set to LFINTOSC
     
     T0CON0bits.T0EN = 1;        //turn on timer 0
+}
+
+void timer2_init(void){
+    // timer 2 is used to run the chorus LFO
+    T2CONbits.TMR2ON = 0;       //turn off timer 2 for config
+    PIR1bits.TMR2IF = 0;        //clear timer 2 match interrupt flag
+    
+    T2CONbits.T2CKPS = 0b11;    //prescaler set to 1:64
+    T2CONbits.T2OUTPS = 0b0001; //postscaler set to 1:2
+    PR2 = 125; 
+    
+    // the above sets the timer 4 match interrupt frequency to
+    // (Fosc / 4) * prescaler * (1 / (PR2)) * postscaler = interrupt freq.
+    // (8MHz) * (1/64) * (1 / (125)) * (1/2) = ~500Hz
+    T2CONbits.TMR2ON = 1;       //turn on timer 2
 }
 
 void timer4_init(void){
@@ -188,6 +208,18 @@ void update_adc_readings(){
     }
 }
 
+void update_chorus_LFO() {
+    //creates the triangle-wave LFO needed to emulate the DMM's chorus LFO
+    
+    chorus_LFO += chorus_LFO_dir;
+    
+    if (chorus_LFO >= 1.0) {
+        chorus_LFO_dir = -0.01;
+    } else if (chorus_LFO <= -1.0){
+        chorus_LFO_dir = 0.01;
+    }
+}
+
 bit tt_pos_edge_detected(){
     // this algo by jack ganssle. returns true if a positive edge has been
     // detected from the tap tempo button. 
@@ -204,7 +236,11 @@ void compute_write_new_nco_freq(unsigned int time){
     // the appropriate NCO increment value. the line also compensates for the
     // fact that each tick of timer 0 only counts for 0.969ms - the input clock
     // for timer 0 runs at 31KHz, not 32KHz!
-    NCO_increment = (unsigned short long) 260111.88 / time;
+    NCO_increment = (unsigned short long) 520223.76 / time;
+    
+    // add in the impact from the chorus LFO, depending on the value of the
+    // chorus knob
+    NCO_increment += (unsigned short long) (chorus_LFO * cho_knb_adc_result);
     
     // establish a lower frequency limit. this limit is, for now, set to just
     // below the lower clock frequency limit on the stock DMM
@@ -214,8 +250,8 @@ void compute_write_new_nco_freq(unsigned int time){
     
     // establish an upper frequency limit. this limit is, for now, set to just
     // above the upper clock frequency limit on the stock DMM
-    if (NCO_increment > 36000){
-        NCO_increment = 36000;
+    if (NCO_increment > 18000){
+        NCO_increment = 18000;
     }
     
     // split this increment value up and put it in the NCO increment register
@@ -295,9 +331,11 @@ void main(void) {
     CWG_init();               //configure the complementary waveform generator
     PPS_init();               //assign peripherals to pins
     timer0_init();            //setup timer 0 and turn it on
+    timer2_init();            //setup timer 2 and turn it on
     timer4_init();            //setup and turn on timer 4
     
     // turn on interrupts
+    PIE1bits.TMR2IE = 1;      //enable the timer 2 to PR2 match interrupt
     PIE2bits.TMR4IE =  1;     //enable the timer 4 to PR4 match interrupt
     INTCONbits.PEIE = 1;      //enable peripheral interrupts
     INTCONbits.GIE = 1;       //general interrupts enabled
@@ -307,7 +345,7 @@ void main(void) {
     
     // below is the main loop
     while(1){
-        CLRWDT();               //clear the Watchdog Timer to keep the PIC from
+        CLRWDT();               //clear the Watchdog timer to keep the PIC from
                                 //resetting
  
         // if the debounce routine found a positive edge, then we must do the
@@ -346,15 +384,21 @@ void main(void) {
             old_dly_knb_adc_result = current_dly_knb_adc_result;
             new_dly_knb_result = 0;            //reset the flag
         }
-        
+
         // update the NCO based on the delay time
         compute_write_new_nco_freq(delay_time);
-        
     }
     return;
 }
 
 void interrupt ISR(void){
+    
+    // check for timer 2 to PR2 match interrupt
+    if (PIR1bits.TMR2IF == 1) {
+        update_chorus_LFO();
+        
+        PIR1bits.TMR2IF = 0;                //reset the interrupt flag
+    }
   
     // check for timer 4 to PR4 match interrupt
     if(PIR2bits.TMR4IF == 1){
@@ -370,8 +414,8 @@ void interrupt ISR(void){
             update_adc_readings();
             adc_timing_flag = 0;
         } else {
-            ADCON0bits.GO_nDONE = 1;               //start ADC
-            adc_timing_flag = 1;    //so that the next time we do a read
+            ADCON0bits.GO_nDONE = 1;         //start ADC
+            adc_timing_flag = 1;             //so that the next time we do a read
         }
    
         PIR2bits.TMR4IF = 0;                 //reset the interrupt flag
