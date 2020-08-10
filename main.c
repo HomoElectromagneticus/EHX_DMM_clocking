@@ -52,15 +52,17 @@
 // variables for the ADC
 volatile bit adc_timing_flag = 0;       //signal to tell the program to run the ADC routine
 volatile bit new_dly_knb_result = 0;            //flag to let us a knob if there's a new dly knob reading
+volatile bit new_cho_knb_result = 0;            //same, but for the chorus knob
 unsigned int dly_knb_adc_result = 0;            //holding register for the delay knob adc result
 unsigned int current_dly_knb_adc_result = 0;    //latest value from delay knob
 unsigned int old_dly_knb_adc_result = 0;        //old value from delay knob
 unsigned int cho_knb_adc_result = 0;            //holding register for the chorus knob adc result
 
-//variables for the chorus LFO
+//variables for the chorus 
 signed float chorus_LFO = 0;              //holds the current value of the chorus LFO
                                           //sort of a phase accumulator
 signed float chorus_LFO_dir = 0.01;       //controls the chorus LFO wave's direction
+signed float chorus_amount = 0;         //the chorus amount (out of 1)
 
 // variables for the tap tempo delay time calculation
 volatile bit calc_tap_tempo_flag = 0;   //sign that we need to compute tempo
@@ -204,6 +206,7 @@ void update_adc_readings(){
         } else if (ADCON0bits.CHS == 0b010000){
             cho_knb_adc_result = ADRES;
             ADCON0bits.CHS = 0b00010;   //switch the channel to the delay time
+            new_cho_knb_result = 1;     //let us know a new chorus knob value is available
         }
     }
 }
@@ -240,7 +243,7 @@ void compute_write_new_nco_freq(unsigned int time){
     
     // add in the impact from the chorus LFO, depending on the value of the
     // chorus knob
-    NCO_increment += (unsigned short long) (chorus_LFO * cho_knb_adc_result);
+    NCO_increment += (unsigned short long) (NCO_increment * chorus_LFO * chorus_amount);
     
     // establish a lower frequency limit. this limit is, for now, set to just
     // below the lower clock frequency limit on the stock DMM
@@ -383,6 +386,12 @@ void main(void) {
             }
             old_dly_knb_adc_result = current_dly_knb_adc_result;
             new_dly_knb_result = 0;            //reset the flag
+        }
+        
+        //compute the chorus amount
+        if (new_cho_knb_result){
+            chorus_amount = 0.0003 * cho_knb_adc_result;
+            new_cho_knb_result = 0;             //reset the flag
         }
 
         // update the NCO based on the delay time
