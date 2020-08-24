@@ -14,7 +14,10 @@
  *                   ------------------
  * 
  * This program drives a clock for four BBD chips in a deluxe memory man
- *
+ * 
+ * License:
+ * CC BY-NC-SA https://creativecommons.org/licenses/by-nc-sa/4.0/
+ * 
  * Created on March 22, 2020, 12:48 AM
  */
 
