@@ -5,15 +5,15 @@
  *                   PIC16F18326
  *                   __________________
  *           VDD ---|1               14|--- VSS
- *               ---|2 / RA5   RA0 / 13|---
- *               ---|3 / RA4   RA1 / 12|---
+ *     dbl time  ---|2 / RA5   RA0 / 13|---
+ *     dotted    ---|3 / RA4   RA1 / 12|---
  *               ---|4 / RA3   RA2 / 11|--- delay time knob input
  *     clk out+  ---|5 / RC5   RC0 / 10|--- chorus amount knob input
  *     clk out-  ---|6 / RC4   RC1 /  9|--- tap tempo button input
- *               ---|7 / RC3   RC2 /  8|--- "on" light
+ *     triplet   ---|7 / RC3   RC2 /  8|--- "on" light
  *                   ------------------
  * 
- * This program drives a clock for four BBD chips
+ * This program drives a clock for four BBD chips in a deluxe memory man
  *
  * Created on March 22, 2020, 12:48 AM
  */
