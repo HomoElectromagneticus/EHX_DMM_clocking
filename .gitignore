@@ -1,11 +1,10 @@
-## MPLAB X files
-build/*
-debug/*
-dist/*
-nbproject/private/*
-nbproject/Makefile-*
-nbproject/Package-*
-/nbproject/private/
+## Ignore list for MPLAB X files
+/fw/build/*
+/fw/debug/*
+/fw/dist/*
+/fw/nbproject/private/*
+/fw/nbproject/Makefile-*
+/fw/nbproject/Package-*
 
 ### Ignore list for KiCAD Projects
 # Temporary files
