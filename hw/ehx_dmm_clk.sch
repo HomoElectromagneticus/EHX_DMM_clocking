@@ -636,17 +636,6 @@ Wire Wire Line
 Text Label 2600 3300 0    50   ~ 0
 CHORUS_AMOUNT
 $Comp
-L Device:R_US R7
-U 1 1 5F42B961
-P 4800 2950
-F 0 "R7" H 4868 2996 50  0000 L CNN
-F 1 "10R" H 4868 2905 50  0000 L CNN
-F 2 "Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P7.62mm_Horizontal" V 4840 2940 50  0001 C CNN
-F 3 "" H 4800 2950 50  0001 C CNN
-	1    4800 2950
-	1    0    0    -1  
-$EndComp
-$Comp
 L power:GND #PWR0121
 U 1 1 5F42B967
 P 4800 2750
@@ -668,25 +657,6 @@ F 3 "" H 4800 3850 50  0001 C CNN
 	1    4800 3850
 	-1   0    0    1   
 $EndComp
-Wire Wire Line
-	4800 3150 4800 3100
-Wire Wire Line
-	4800 2800 4800 2750
-$Comp
-L Device:R_US R8
-U 1 1 5F42B975
-P 4800 3650
-F 0 "R8" H 4600 3700 50  0000 L CNN
-F 1 "10R" H 4550 3600 50  0000 L CNN
-F 2 "Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P7.62mm_Horizontal" V 4840 3640 50  0001 C CNN
-F 3 "" H 4800 3650 50  0001 C CNN
-	1    4800 3650
-	1    0    0    -1  
-$EndComp
-Wire Wire Line
-	4800 3500 4800 3450
-Wire Wire Line
-	4800 3800 4800 3850
 Wire Wire Line
 	4650 3300 3950 3300
 Text Label 3950 3300 0    50   ~ 0
@@ -825,17 +795,6 @@ F 3 "" H 4800 3300 50  0001 C CNN
 	-1   0    0    -1  
 $EndComp
 $Comp
-L Device:R_US R3
-U 1 1 5F443F69
-P 3450 2950
-F 0 "R3" H 3518 2996 50  0000 L CNN
-F 1 "10R" H 3518 2905 50  0000 L CNN
-F 2 "Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P7.62mm_Horizontal" V 3490 2940 50  0001 C CNN
-F 3 "" H 3450 2950 50  0001 C CNN
-	1    3450 2950
-	1    0    0    -1  
-$EndComp
-$Comp
 L power:GND #PWR06
 U 1 1 5F443F6F
 P 3450 2750
@@ -857,25 +816,6 @@ F 3 "" H 3450 3850 50  0001 C CNN
 	1    3450 3850
 	-1   0    0    1   
 $EndComp
-Wire Wire Line
-	3450 3150 3450 3100
-Wire Wire Line
-	3450 2800 3450 2750
-$Comp
-L Device:R_US R4
-U 1 1 5F443F7D
-P 3450 3650
-F 0 "R4" H 3250 3700 50  0000 L CNN
-F 1 "10R" H 3200 3600 50  0000 L CNN
-F 2 "Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P7.62mm_Horizontal" V 3490 3640 50  0001 C CNN
-F 3 "" H 3450 3650 50  0001 C CNN
-	1    3450 3650
-	1    0    0    -1  
-$EndComp
-Wire Wire Line
-	3450 3500 3450 3450
-Wire Wire Line
-	3450 3800 3450 3850
 $Comp
 L Device:R_POT_US RV1
 U 1 1 5F443F86
@@ -1251,4 +1191,12 @@ Wire Wire Line
 	1500 7150 1500 7250
 Text Notes 700  6750 0    50   ~ 0
 Power Input
+Wire Wire Line
+	3450 2750 3450 3150
+Wire Wire Line
+	3450 3450 3450 3850
+Wire Wire Line
+	4800 2750 4800 3150
+Wire Wire Line
+	4800 3450 4800 3850
 $EndSCHEMATC
